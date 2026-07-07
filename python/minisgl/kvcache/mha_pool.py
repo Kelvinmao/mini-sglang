@@ -1,3 +1,5 @@
+"""Physical multi-head-attention KV-cache pool."""
+
 from __future__ import annotations
 
 import torch
@@ -9,8 +11,11 @@ from .base import BaseKVCachePool
 
 class MHAKVCache(BaseKVCachePool):
     """
-    Base class for key-value caches.
-    This class defines the interface for key-value caches used in LLMs.
+    Layer-major KV-cache storage for dense attention models.
+
+    The backing tensor is shaped as ``(K/V, layer, page, offset, local_kv_head,
+    head_dim)``. Tensor-parallel ranks store only their local KV heads unless
+    the model has fewer KV heads than ranks, in which case heads are replicated.
     """
 
     def __init__(
@@ -23,6 +28,10 @@ class MHAKVCache(BaseKVCachePool):
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
+        """
+        Allocate the physical KV-cache buffer.
+        """
+
         tp_info = get_tp_info()
         local_kv_heads = div_even(num_kv_heads, tp_info.size, allow_replicate=True)
         self._kv_buffer = torch.empty(
@@ -37,14 +46,26 @@ class MHAKVCache(BaseKVCachePool):
         self._storage_shape = (num_pages * page_size, local_kv_heads, head_dim)
 
     def k_cache(self, index: int) -> torch.Tensor:
+        """
+        Return the key-cache slice for one layer.
+        """
+
         return self._k_buffer[index]
 
     def v_cache(self, index: int) -> torch.Tensor:
+        """
+        Return the value-cache slice for one layer.
+        """
+
         return self._v_buffer[index]
 
     def store_kv(
         self, k: torch.Tensor, v: torch.Tensor, out_loc: torch.Tensor, layer_id: int
     ) -> None:
+        """
+        Store freshly computed K/V rows into physical cache locations.
+        """
+
         from minisgl.kernel import store_cache
 
         store_cache(
@@ -57,12 +78,24 @@ class MHAKVCache(BaseKVCachePool):
 
     @property
     def device(self) -> torch.device:
+        """
+        Return the CUDA device that owns the cache.
+        """
+
         return self._device
 
     @property
     def dtype(self) -> torch.dtype:
+        """
+        Return the cache tensor dtype.
+        """
+
         return self._kv_buffer.dtype
 
     @property
     def num_layers(self) -> int:
+        """
+        Return the number of model layers stored in the cache.
+        """
+
         return self._num_layers

@@ -1,3 +1,11 @@
+"""Shared runtime objects passed between scheduler, engine, and model layers.
+
+The objects in this module intentionally stay small and mutable. A request's
+token ids live on CPU for ownership and streaming bookkeeping, while the
+per-request table slot points into scheduler-owned GPU tables that hold token
+ids and KV-cache locations.
+"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -14,6 +22,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class SamplingParams:
+    """
+    User-visible sampling controls normalized before a request reaches the scheduler.
+    """
+
     temperature: float = 0.0
     top_k: int = -1
     top_p: float = 1.0
@@ -22,11 +34,26 @@ class SamplingParams:
 
     @property
     def is_greedy(self) -> bool:
+        """
+        Return whether the request can skip probabilistic sampling kernels.
+        """
+
         return (self.temperature <= 0.0 or self.top_k == 1) and self.top_p == 1.0
 
 
 @dataclass(eq=False)
 class Req:
+    """
+    Mutable scheduler-side state for one active generation request.
+
+    ``input_ids`` is the authoritative CPU token history. ``device_len`` tracks
+    how many tokens have corresponding rows in the scheduler token/page tables,
+    and ``cached_len`` tracks the prefix that is already materialized in KV
+    cache. During prefill, ``device_len - cached_len`` is the extend region. In
+    decode, the extend region is the single token produced by the previous
+    forward pass.
+    """
+
     input_ids: torch.Tensor  # cpu tensor
     table_idx: int
     cached_len: int
@@ -36,6 +63,10 @@ class Req:
     cache_handle: BaseCacheHandle
 
     def __post_init__(self) -> None:
+        """
+        Initialize mutable length counters derived from the CPU prompt.
+        """
+
         assert self.input_ids.is_cpu
         self.device_len = len(self.input_ids)
         self.max_device_len = len(self.input_ids) + self.output_len
@@ -43,21 +74,44 @@ class Req:
 
     @property
     def remain_len(self) -> int:
+        """
+        Return the remaining number of decode tokens allowed for this request.
+        """
+
         return self.max_device_len - self.device_len
 
     @property
     def extend_len(self) -> int:
+        """
+        Return the number of uncached tokens that the next forward pass must process.
+        """
+
         return self.device_len - self.cached_len
 
     def complete_one(self) -> None:
+        """
+        Advance request lengths after the engine has produced one next token.
+        """
+
         self.cached_len = self.device_len
         self.device_len += 1
 
     def append_host(self, next_token: torch.Tensor) -> None:
+        """
+        Append a sampled token to the CPU-side token history.
+
+        Args:
+            next_token: One-token CPU tensor copied back from the engine stream.
+        """
+
         self.input_ids = torch.cat([self.input_ids, next_token])
 
     @property
     def can_decode(self) -> bool:
+        """
+        Return whether this request should remain in the decode set.
+        """
+
         return self.remain_len > 0
 
     def __repr__(self) -> str:
@@ -70,6 +124,14 @@ class Req:
 
 @dataclass
 class Batch:
+    """
+    A scheduled group of requests prepared for one model forward.
+
+    Scheduler code fills token positions and output locations, then the selected
+    attention backend attaches backend-specific metadata. ``padded_reqs`` may
+    include dummy requests when CUDA graph replay requires a captured batch size.
+    """
+
     reqs: List[Req]
     phase: Literal["prefill", "decode"]
     # these fields should be set by scheduler
@@ -82,23 +144,48 @@ class Batch:
 
     @property
     def is_prefill(self) -> bool:
+        """
+        Return whether this batch extends prompts through prefill.
+        """
+
         return self.phase == "prefill"
 
     @property
     def is_decode(self) -> bool:
+        """
+        Return whether this batch produces one token per request.
+        """
+
         return self.phase == "decode"
 
     @property
     def size(self) -> int:
+        """
+        Return the number of real requests in the batch.
+        """
+
         return len(self.reqs)
 
     @property
     def padded_size(self) -> int:
+        """
+        Return the CUDA-graph padded batch size.
+        """
+
         return len(self.padded_reqs)
 
 
 @dataclass
 class Context:
+    """
+    Process-local model context shared by layers during a forward pass.
+
+    The model layers access attention metadata, page tables, KV cache, and MoE
+    backends through this context instead of receiving them through every layer
+    call. ``forward_batch`` scopes the active batch so layer code can retrieve
+    exactly the metadata for the in-flight forward.
+    """
+
     page_size: int
     # NOTE: this table always treat page_size = 1
     page_table: torch.Tensor = field(init=False)
@@ -109,11 +196,22 @@ class Context:
 
     @property
     def batch(self) -> Batch:
+        """
+        Return the active forward batch.
+        """
+
         assert self._batch is not None, "No active batch in context"
         return self._batch
 
     @contextmanager
     def forward_batch(self, batch: Batch):
+        """
+        Temporarily expose ``batch`` to model layers for one forward call.
+
+        Args:
+            batch: Prepared batch whose metadata matches the model invocation.
+        """
+
         assert self._batch is None, "Nested forward_batch is not allowed"
         try:
             self._batch = batch
@@ -126,11 +224,22 @@ _GLOBAL_CTX: Context | None = None
 
 
 def set_global_ctx(ctx: Context):
+    """
+    Register the process-local context used by layers and backends.
+
+    Args:
+        ctx: Context built by the engine during process initialization.
+    """
+
     global _GLOBAL_CTX
     assert _GLOBAL_CTX is None, "Global context is already set"
     _GLOBAL_CTX = ctx
 
 
 def get_global_ctx() -> Context:
+    """
+    Return the process-local context.
+    """
+
     assert _GLOBAL_CTX is not None, "Global context is not set"
     return _GLOBAL_CTX

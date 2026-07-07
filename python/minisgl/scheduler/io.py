@@ -1,3 +1,5 @@
+"""Scheduler communication helpers for tokenizer and tensor-parallel ranks."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, List
@@ -25,6 +27,14 @@ class SchedulerIOMixin:
     """
 
     def __init__(self, config: SchedulerConfig, tp_cpu_group: torch.distributed.ProcessGroup):
+        """
+        Configure rank-local receive/send functions for online or offline serving.
+
+        Args:
+            config: Scheduler configuration, including ZMQ addresses and TP rank.
+            tp_cpu_group: CPU-side process group used for rank synchronization.
+        """
+
         tp_info = config.tp_info
         self.tp_cpu_group: Final = tp_cpu_group
         if config.offline_mode:
@@ -48,6 +58,9 @@ class SchedulerIOMixin:
         send = self._reply_tokenizer_rank0
         if tp_info.size > 1:
             if tp_info.is_primary():
+                # Rank 0 is the only rank connected to tokenizer. It fans out
+                # raw serialized messages to non-primary ranks so every rank
+                # sees an identical scheduler event stream.
                 recv = self._recv_msg_multi_rank0
                 self._send_into_ranks: Final = ZmqPubQueue(
                     config.zmq_scheduler_broadcast_addr, create=True, encoder=BaseBackendMsg.encoder
@@ -65,18 +78,38 @@ class SchedulerIOMixin:
         self.send_result = send
 
     def run_when_idle(self):
+        """
+        Hook called before a blocking receive.
+        """
+
         raise NotImplementedError("should be implemented")
 
     def offline_receive_msg(self, blocking: bool = False) -> List[BaseBackendMsg]:
+        """
+        Offline-mode replacement for ZMQ receives.
+        """
+
         raise NotImplementedError("should be implemented")
 
     def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
+        """
+        Offline-mode replacement for tokenizer replies.
+        """
+
         raise NotImplementedError("should be implemented")
 
     def sync_all_ranks(self) -> None:
+        """
+        Synchronize all tensor-parallel ranks on the CPU process group.
+        """
+
         self.tp_cpu_group.barrier().wait()
 
     def _recv_msg_single_rank(self, blocking: bool = False) -> List[BaseBackendMsg]:
+        """
+        Receive tokenizer messages for non-TP serving.
+        """
+
         pending_msgs: List[BaseBackendMsg] = []
         if blocking:
             self.run_when_idle()
@@ -86,6 +119,10 @@ class SchedulerIOMixin:
         return pending_msgs
 
     def _recv_msg_multi_rank0(self, blocking: bool = False) -> List[BaseBackendMsg]:
+        """
+        Receive on rank 0 and broadcast raw messages to other TP ranks.
+        """
+
         pending_msgs: List[BaseBackendMsg] = []
         if blocking:
             self.run_when_idle()
@@ -107,6 +144,10 @@ class SchedulerIOMixin:
         return pending_msgs
 
     def _recv_msg_multi_rank1(self, blocking: bool = False) -> List[BaseBackendMsg]:
+        """
+        Receive the rank-0 broadcast stream on non-primary TP ranks.
+        """
+
         pending_msgs: List[BaseBackendMsg] = []
         if blocking:
             self.run_when_idle()
@@ -122,6 +163,10 @@ class SchedulerIOMixin:
         return pending_msgs
 
     def _reply_tokenizer_rank0(self, reply: List[DetokenizeMsg]) -> None:
+        """
+        Send generated tokens from rank 0 back to the detokenizer.
+        """
+
         num_reply = len(reply)
         logger.debug_rank0(f"Replying to tokenizer: {num_reply} messages")
         if num_reply == 1:
@@ -130,4 +175,8 @@ class SchedulerIOMixin:
             self._send_into_tokenizer.put(BatchTokenizerMsg(data=reply))  # type: ignore
 
     def _reply_tokenizer_rank1(self, reply: List[DetokenizeMsg]) -> None:
+        """
+        Drop replies on non-primary ranks.
+        """
+
         _ = reply  # do nothing for non-primary ranks

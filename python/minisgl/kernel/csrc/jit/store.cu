@@ -9,6 +9,13 @@
 #include <cstddef>
 #include <cstdint>
 
+// JIT-specialized KV-cache store kernels.
+//
+// The scheduler computes physical KV-cache token locations in Python. This
+// kernel copies the freshly produced K and V rows into those sparse physical
+// rows with one warp per token, preserving the page-table layout consumed by
+// attention backends.
+
 namespace {
 
 struct StoreKernelParams {
@@ -40,6 +47,9 @@ __global__ __launch_bounds__(kNumThreads, kMaxOccupancy) void //
 
   // each warp handles one element
   if (warp_id < length) {
+    // ``indices`` maps flattened batch tokens to physical cache rows. K and V
+    // share the same row location but come from separate contiguous input
+    // tensors produced by the model layer.
     const auto pos = static_cast<const T *>(indices)[warp_id];
     const auto dst_k = pointer::offset(k_cache, pos * kv_cache_stride);
     const auto src_k = pointer::offset(k, warp_id * kv_input_stride);
@@ -96,6 +106,8 @@ struct StoreKernel {
     const auto kv_cache_stride = X.unwrap() * dtype_size;
     const auto kv_input_stride = Y.unwrap() * dtype_size;
 
+    // Store byte strides instead of element strides so the device copy helper
+    // can operate on untyped pointers for all supported floating dtypes.
     const auto params = StoreKernelParams{
         .k_cache = k_cache.data_ptr(),
         .v_cache = v_cache.data_ptr(),

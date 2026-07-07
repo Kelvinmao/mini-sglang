@@ -1,3 +1,11 @@
+"""Main scheduler loop for online/offline LLM serving.
+
+The scheduler is the coordinator on each tensor-parallel rank. It receives
+tokenized requests, admits prompt prefill work, keeps decode requests running,
+prepares page-table and attention metadata, launches the engine, and streams
+tokens back through the detokenizer.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
@@ -31,8 +39,16 @@ logger = init_logger(__name__)
 Indice2D: TypeAlias = Tuple[torch.Tensor, torch.Tensor]
 
 
-# For overlap scheduling, we also need to cache some other data to avoid IMA
 class ForwardInput(NamedTuple):
+    """
+    Fully prepared engine input captured before an asynchronous forward launch.
+
+    Overlap scheduling processes the previous forward result while the next
+    forward is running. This tuple keeps every scheduler-side tensor needed
+    after the launch so metadata does not need to be recomputed or mutated while
+    the engine stream is in flight.
+    """
+
     batch: Batch
     sample_args: BatchSamplingArgs
     input_tuple: Indice2D  # (token_mapping, positions)
@@ -44,6 +60,13 @@ ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
+        """
+        Build the engine and scheduler-side managers for one TP rank.
+
+        Args:
+            config: Scheduler and engine configuration for this rank.
+        """
+
         from minisgl.engine import Engine
 
         self.engine = Engine(config)
@@ -76,7 +99,10 @@ class Scheduler(SchedulerIOMixin):
         super().__init__(config, self.engine.tp_cpu_group)
 
     def run_when_idle(self) -> None:
-        """Called when the scheduler is idle to perform background tasks."""
+        """
+        Run lightweight maintenance before blocking for new work.
+        """
+
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
 
@@ -87,6 +113,9 @@ class Scheduler(SchedulerIOMixin):
         It will overlap the execution of current batch and processing of last batch's results,
         which can effectively hide CPU latency and improve GPU utilization.
         """
+        # If there is no prior result to process and no runnable work queued,
+        # block on input. Otherwise poll so CPU-side scheduling can keep
+        # overlapping with the engine stream.
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
             or self.prefill_manager.runnable
@@ -99,6 +128,9 @@ class Scheduler(SchedulerIOMixin):
         ongoing_data = None
         if forward_input is not None:
             with self.engine_stream_ctx:  # run the batch in the engine's stream
+                # Metadata and page-table staging happens on ``self.stream``.
+                # The engine stream waits only once, then can run while this
+                # stream processes the previous batch's CPU-visible result.
                 self.engine.stream.wait_stream(self.stream)
                 ongoing_data = (forward_input, self._forward(forward_input))
 
@@ -106,6 +138,10 @@ class Scheduler(SchedulerIOMixin):
         return ongoing_data
 
     def normal_loop(self) -> None:
+        """
+        Run one non-overlapped scheduler iteration.
+        """
+
         blocking = not (self.prefill_manager.runnable or self.decode_manager.runnable)
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
@@ -119,6 +155,10 @@ class Scheduler(SchedulerIOMixin):
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
+        """
+        Enter the scheduler event loop until interrupted by ``ExitMsg`` or offline mode.
+        """
+
         if ENV.DISABLE_OVERLAP_SCHEDULING:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
@@ -131,11 +171,23 @@ class Scheduler(SchedulerIOMixin):
                 data = self.overlap_loop(data)
 
     def shutdown(self) -> None:
+        """
+        Synchronize ranks and release engine resources.
+        """
+
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
         self.engine.shutdown()
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
+        """
+        Commit sampled tokens from a completed forward pass.
+
+        Args:
+            last_data: Input and output tuple returned by a prior ``_forward``
+                call, or ``None`` when no forward has completed.
+        """
+
         if last_data is None:
             return
 
@@ -148,6 +200,10 @@ class Scheduler(SchedulerIOMixin):
                 if isinstance(req, ChunkedReq):
                     continue
                 next_token = next_tokens_cpu[i]
+                # The GPU token pool was updated immediately after sampling.
+                # The CPU history is updated only after the async D2H copy is
+                # complete so detokenization and prefix-cache insertion see a
+                # consistent token sequence.
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
                 finished = not req.can_decode
@@ -167,6 +223,13 @@ class Scheduler(SchedulerIOMixin):
         self.send_result(reply)
 
     def _process_one_msg(self, msg: BaseBackendMsg) -> None:
+        """
+        Apply one backend control message to scheduler queues.
+
+        Args:
+            msg: Tokenizer/backend message received from ZMQ or offline mode.
+        """
+
         if isinstance(msg, BatchBackendMsg):
             for msg in msg.data:
                 self._process_one_msg(msg)
@@ -198,10 +261,27 @@ class Scheduler(SchedulerIOMixin):
             raise NotImplementedError
 
     def _free_req_resources(self, req: Req) -> None:
+        """
+        Return table and KV-cache resources owned by a request.
+
+        Args:
+            req: Request that finished or was aborted.
+        """
+
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
+        """
+        Materialize all GPU-side inputs required for one engine forward.
+
+        Args:
+            batch: Batch chosen by the prefill or decode manager.
+
+        Returns:
+            Immutable launch data consumed by ``_forward`` and result handling.
+        """
+
         self.engine.graph_runner.pad_batch(batch)
         self.cache_manager.allocate_paged(batch.reqs)
         batch.positions = _make_positions(batch, self.device)
@@ -217,6 +297,10 @@ class Scheduler(SchedulerIOMixin):
         )
 
     def _schedule_next_batch(self) -> ForwardInput | None:
+        """
+        Choose and prepare the next batch according to the current policy.
+        """
+
         # TODO: support other policies: e.g. DECODE first
         batch = (
             self.prefill_manager.schedule_next_batch(self.prefill_budget)
@@ -225,6 +309,10 @@ class Scheduler(SchedulerIOMixin):
         return self._prepare_batch(batch) if batch else None
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
+        """
+        Launch one engine forward and update device token tables with sampled tokens.
+        """
+
         batch, sample_args, input_mapping, output_mapping = forward_input
         batch.input_ids = self.token_pool[input_mapping]
         forward_output = self.engine.forward_batch(batch, sample_args)
@@ -234,6 +322,17 @@ class Scheduler(SchedulerIOMixin):
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
+    """
+    Build logical token positions for every uncached token in a batch.
+
+    Args:
+        batch: Prepared batch including CUDA-graph padding requests.
+        device: Target CUDA device.
+
+    Returns:
+        Device tensor containing positions aligned with flattened batch tokens.
+    """
+
     needed_size = sum(r.extend_len for r in batch.padded_reqs)
     indices_host = torch.empty(needed_size, dtype=torch.int32, pin_memory=True)
     offset = 0
@@ -250,6 +349,17 @@ def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
 
 
 def _make_input_tuple(batch: Batch, device: torch.device) -> Indice2D:
+    """
+    Build advanced-indexing tensors that read flattened input token ids.
+
+    Args:
+        batch: Prepared batch including padding requests.
+        device: Target CUDA device.
+
+    Returns:
+        Pair ``(table_rows, positions)`` used as ``token_pool[pair]``.
+    """
+
     mapping_host = torch.empty(len(batch.positions), dtype=torch.int64, pin_memory=True)
     offset = 0
     for req in batch.padded_reqs:
@@ -260,6 +370,14 @@ def _make_input_tuple(batch: Batch, device: torch.device) -> Indice2D:
 
 
 def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
+    """
+    Build advanced-indexing tensors that write sampled tokens to the token pool.
+
+    Requests that cannot decode again receive ``-1`` as their write position;
+    those writes target the last column and are ignored because the request is
+    removed before another read.
+    """
+
     mapping_list = [req.table_idx for req in batch.reqs]
     mapping_host = torch.tensor(mapping_list, dtype=torch.int64, pin_memory=True)
     write_list = [(req.device_len if req.can_decode else -1) for req in batch.reqs]

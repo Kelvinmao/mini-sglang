@@ -1,3 +1,5 @@
+"""Tensor-parallel collective communication implementations."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -14,6 +16,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class DistributedImpl(ABC):
+    """
+    Interface implemented by collective backends.
+    """
+
     @abstractmethod
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor: ...
 
@@ -23,7 +29,15 @@ class DistributedImpl(ABC):
 
 @dataclass
 class TorchDistributedImpl(DistributedImpl):
+    """
+    Collective implementation backed by ``torch.distributed``.
+    """
+
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Sum ``x`` across TP ranks in place and return it.
+        """
+
         tp_size = dist.get_world_size()
         if tp_size == 1:
             return x
@@ -31,6 +45,10 @@ class TorchDistributedImpl(DistributedImpl):
         return x
 
     def all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Concatenate ``x`` from all TP ranks along the leading dimension.
+        """
+
         tp_size = dist.get_world_size()
         if tp_size == 1:
             return x
@@ -43,13 +61,25 @@ class TorchDistributedImpl(DistributedImpl):
 
 @dataclass
 class PyNCCLDistributedImpl(DistributedImpl):
+    """
+    Collective implementation backed by the custom PyNCCL FFI communicator.
+    """
+
     comm: PyNCCLCommunicator
 
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Sum ``x`` across TP ranks in place and return it.
+        """
+
         self.comm.all_reduce(x, "sum")
         return x
 
     def all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Concatenate ``x`` from all TP ranks along the leading dimension.
+        """
+
         from .info import get_tp_info
 
         world_size = get_tp_info().size
@@ -61,12 +91,27 @@ class PyNCCLDistributedImpl(DistributedImpl):
 
 
 class DistributedCommunicator:
+    """
+    Runtime dispatch point for tensor-parallel collectives.
+
+    The default plugin is torch.distributed. Engine initialization can append a
+    PyNCCL plugin, and calls always use the most recently enabled backend.
+    """
+
     plugins: List[DistributedImpl] = [TorchDistributedImpl()]
 
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Dispatch all-reduce to the active backend.
+        """
+
         return self.plugins[-1].all_reduce(x)
 
     def all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Dispatch all-gather to the active backend.
+        """
+
         return self.plugins[-1].all_gather(x)
 
 
@@ -75,6 +120,11 @@ def enable_pynccl_distributed(
 ) -> None:
     """
     Enable PyNCCL-based distributed communication for tensor parallelism.
+
+    Args:
+        tp_info: Tensor-parallel rank information.
+        tp_cpu_group: CPU process group used to broadcast NCCL unique IDs.
+        max_bytes: Maximum symmetric-buffer size used by the custom NCCL wrapper.
     """
     if tp_info.size == 1:
         return

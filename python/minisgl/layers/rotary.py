@@ -1,3 +1,5 @@
+"""Rotary-position-embedding cache with model-specific scaling variants."""
+
 from __future__ import annotations
 
 import functools
@@ -10,6 +12,10 @@ from .base import StateLessOP
 
 
 class RotaryEmbedding(StateLessOP):
+    """
+    FlashInfer-backed in-place RoPE application.
+    """
+
     def __init__(
         self,
         head_size: int,
@@ -18,6 +24,10 @@ class RotaryEmbedding(StateLessOP):
         base: float,
         post_process: None | Callable[[torch.Tensor], torch.Tensor] = None,
     ) -> None:
+        """
+        Precompute cosine/sine cache for the configured RoPE variant.
+        """
+
         super().__init__()
         self.head_size = head_size
         assert rotary_dim == head_size
@@ -42,6 +52,10 @@ class RotaryEmbedding(StateLessOP):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply RoPE in place to query and key tensors.
+        """
+
         self.apply_rope_with_cos_sin_cache_inplace(
             positions=positions,
             query=query,
@@ -59,6 +73,10 @@ def _get_rope(
     base: float,
     rope_scaling: Dict[str, Any] | None = None,
 ) -> RotaryEmbedding:
+    """
+    Build a RoPE module, applying Llama 3 or YaRN scaling when requested.
+    """
+
     if rope_scaling is None:
         return RotaryEmbedding(head_dim, rotary_dim, max_position, base)
     # need to test some cases:
@@ -73,6 +91,10 @@ def _get_rope(
             original_max_position: int = rope_scaling["original_max_position_embeddings"]
 
             def post_process(inv_freq: torch.Tensor) -> torch.Tensor:
+                """
+                Apply Llama 3 frequency-dependent interpolation.
+                """
+
                 # no smooth if low_freq_factor == high_freq_factor
                 wave_len = 2 * math.pi / inv_freq
                 if low_freq_factor == high_freq_factor:
@@ -97,12 +119,20 @@ def _get_rope(
             orig_max_pos: int = rope_scaling["original_max_position_embeddings"]
 
             def _find_correction_dim(num_rotations: float) -> float:
+                """
+                Convert a rotation-count threshold into a frequency dimension.
+                """
+
                 return rotary_dim * math.log(orig_max_pos / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
             low = max(math.floor(_find_correction_dim(beta_fast)), 0)
             high = min(math.ceil(_find_correction_dim(beta_slow)), rotary_dim // 2 - 1)
 
             def post_process(inv_freq: torch.Tensor) -> torch.Tensor:
+                """
+                Apply YaRN's ramped interpolation to inverse frequencies.
+                """
+
                 ramp = torch.clamp(
                     (torch.arange(rotary_dim // 2, dtype=torch.float32) - low) / max(high - low, 1),
                     0, 1,
@@ -118,6 +148,10 @@ _ROPE_DEVICE: torch.device | None = None
 
 
 def set_rope_device(device: torch.device):
+    """
+    Set the real device used when model construction runs under ``meta``.
+    """
+
     global _ROPE_DEVICE
     _ROPE_DEVICE = device
 
@@ -130,6 +164,10 @@ def get_rope(
     base: float,
     rope_scaling: Tuple[Tuple[str, Any], ...] | None = None,
 ) -> RotaryEmbedding:
+    """
+    Return a cached RoPE module for a model configuration.
+    """
+
     rope_map = dict(rope_scaling) if rope_scaling is not None else None
     t = torch.tensor([])
     if t.device == torch.device("meta"):

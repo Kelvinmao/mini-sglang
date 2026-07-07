@@ -1,3 +1,11 @@
+"""Per-rank model engine.
+
+The engine owns CUDA setup, tensor-parallel communication, model weights,
+physical KV-cache buffers, attention/MoE backends, sampling, and optional CUDA
+graph replay. The scheduler prepares batches; the engine executes them on its
+dedicated CUDA stream.
+"""
+
 from __future__ import annotations
 
 from datetime import timedelta
@@ -21,6 +29,14 @@ logger = init_logger(__name__)
 
 
 class ForwardOutput(NamedTuple):
+    """
+    Result of one engine forward.
+
+    ``next_tokens_gpu`` is written back into the scheduler token pool on the
+    engine stream. ``next_tokens_cpu`` is used later by the scheduler after
+    ``copy_done_event`` confirms the asynchronous device-to-host copy finished.
+    """
+
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
@@ -28,6 +44,13 @@ class ForwardOutput(NamedTuple):
 
 class Engine:
     def __init__(self, config: EngineConfig):
+        """
+        Initialize one tensor-parallel engine process.
+
+        Args:
+            config: Engine configuration for the current TP rank.
+        """
+
         assert not torch.cuda.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         _adjust_config(config)
@@ -86,6 +109,9 @@ class Engine:
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
         # ======================= Graph capture initialization ========================
+        # The dummy request fills padding rows for captured graph sizes. Its
+        # page table points at an extra dummy KV-cache page so kernels always
+        # receive valid addresses even when graph replay pads the real batch.
         self.dummy_req = Req(
             input_ids=torch.tensor([0], dtype=torch.int32, device="cpu"),
             table_idx=config.max_running_req,
@@ -110,7 +136,20 @@ class Engine:
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
+        """
+        Initialize CPU and GPU communication for tensor parallelism.
+
+        Args:
+            config: Engine configuration with TP rank and backend choices.
+
+        Returns:
+            CPU-side process group used for scheduler synchronization and
+            PyNCCL bootstrap.
+        """
+
         if config.tp_info.size == 1 or config.use_pynccl:
+            # PyNCCL handles CUDA collectives directly, but torch.distributed is
+            # still used as a CPU bootstrap channel for unique IDs and barriers.
             torch.distributed.init_process_group(
                 backend="gloo",
                 rank=config.tp_info.rank,
@@ -137,6 +176,10 @@ class Engine:
         return tp_cpu_group
 
     def _load_weight_state_dict(self, config: EngineConfig) -> Dict[str, torch.Tensor]:
+        """
+        Load model weights for this TP rank.
+        """
+
         if config.use_dummy_weight:
             return {
                 k: torch.randn_like(v, device=self.device)
@@ -146,6 +189,17 @@ class Engine:
             return {k: v.to(self.dtype) for k, v in load_weight(config.model_path, self.device)}
 
     def _determine_num_pages(self, old_free_memory: int, config: EngineConfig) -> int:
+        """
+        Compute how many KV-cache pages can fit after model weights are loaded.
+
+        Args:
+            old_free_memory: Free memory before model initialization.
+            config: Engine configuration, including memory ratio and overrides.
+
+        Returns:
+            Number of usable KV-cache pages.
+        """
+
         new_free_memory = self._sync_get_memory()[1]
         cache_per_page = (
             2  # key + value
@@ -189,6 +243,17 @@ class Engine:
         return min_free_memory, max_free_memory
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+        """
+        Run model forward and sample one token for each real request.
+
+        Args:
+            batch: Scheduler-prepared prefill or decode batch.
+            args: Per-request sampling tensors.
+
+        Returns:
+            GPU/CPU sampled token tensors plus the async copy completion event.
+        """
+
         assert torch.cuda.current_stream() == self.stream
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
@@ -201,21 +266,35 @@ class Engine:
 
         next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
+        # The scheduler can process other work while the copy completes, then
+        # synchronizes on this event before mutating CPU request histories.
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
     def shutdown(self) -> None:
+        """
+        Release CUDA graph and distributed communication resources.
+        """
+
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
 
 
 def _align_up_32(num: int) -> int:
+    """
+    Round ``num`` up to the next multiple of 32.
+    """
+
     return (num + 31) // 32 * 32
 
 
 def _adjust_config(config: EngineConfig):
+    """
+    Apply architecture-dependent backend overrides to a frozen config object.
+    """
+
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
 

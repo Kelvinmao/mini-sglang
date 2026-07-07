@@ -1,3 +1,5 @@
+"""Utilities for building TVM FFI C++/CUDA extension modules."""
+
 from __future__ import annotations
 
 import pathlib
@@ -15,31 +17,59 @@ CPP_TEMPLATE_TYPE: TypeAlias = Union[int, float, bool]
 
 
 class CppArgList(list[str]):
+    """
+    Stringable list used for generated C++ template argument lists.
+    """
+
     def __str__(self) -> str:
+        """
+        Join arguments with the syntax expected by C++ templates.
+        """
+
         return ", ".join(self)
 
 
 class KernelConfig(NamedTuple):
+    """
+    Common launch-template configuration for generated kernels.
+    """
+
     num_threads: int
     max_occupancy: int
     use_pdl: bool
 
     @property
     def template_args(self) -> str:
+        """
+        Return this configuration as a C++ template argument string.
+        """
+
         pdl = "true" if self.use_pdl else "false"
         return f"{self.num_threads},{self.max_occupancy},{pdl}"
 
 
 def _make_name(*args: str) -> str:
+    """
+    Build a stable TVM module name for kernel caching.
+    """
+
     return "minisgl__" + "_".join(str(arg) for arg in args)
 
 
 def _make_wrapper(tup: Tuple[str, str]) -> str:
+    """
+    Generate a TVM FFI exported wrapper declaration.
+    """
+
     export_name, kernel_name = tup
     return f"TVM_FFI_DLL_EXPORT_TYPED_FUNC({export_name}, ({kernel_name}));"
 
 
 def make_cpp_args(*args: CPP_TEMPLATE_TYPE) -> CppArgList:
+    """
+    Convert Python scalars into C++ template argument literals.
+    """
+
     def _convert(arg: CPP_TEMPLATE_TYPE) -> str:
         if isinstance(arg, bool):
             return "true" if arg else "false"
@@ -60,6 +90,10 @@ def load_aot(
     extra_include_paths: List[str] | None = None,
     build_directory: str | None = None,
 ) -> Module:
+    """
+    Build or load a source-backed TVM FFI module from packaged kernel files.
+    """
+
     from tvm_ffi.cpp import load
 
     cpp_files = cpp_files or []
@@ -96,6 +130,13 @@ def load_jit(
     extra_include_paths: List[str] | None = None,
     build_directory: str | None = None,
 ) -> Module:
+    """
+    Build or load an inline TVM FFI module for template-specialized kernels.
+
+    ``load_jit`` includes source files from ``kernel/csrc/jit`` and appends
+    exported wrapper declarations generated from the selected specialization.
+    """
+
     from tvm_ffi.cpp import load_inline
 
     cpp_files = cpp_files or []

@@ -1,3 +1,5 @@
+"""Typed environment-variable registry for Mini-SGLang runtime knobs."""
+
 from __future__ import annotations
 
 import os
@@ -6,6 +8,10 @@ from typing import Callable, Generic, TypeVar
 
 
 class BaseEnv:
+    """
+    Base protocol for env entries owned by ``EnvClassSingleton``.
+    """
+
     def _init(self, name: str) -> None:
         raise NotImplementedError
 
@@ -14,12 +20,24 @@ T = TypeVar("T")
 
 
 class EnvVar(BaseEnv, Generic[T]):
+    """
+    Typed environment variable with default value and parser.
+    """
+
     def __init__(self, default_value: T, fn: Callable[[str], T]):
+        """
+        Store parser and default value.
+        """
+
         self.value = default_value
         self.fn = fn
         super().__init__()
 
     def _init(self, name: str) -> None:
+        """
+        Load and parse one environment variable if it is present.
+        """
+
         env_value = os.getenv(name)
         if env_value is not None:
             try:
@@ -38,6 +56,10 @@ _TO_BOOL = lambda x: x.lower() in ("1", "true", "yes")
 
 
 def _PARSE_MEM_BYTES(mem: str) -> int:
+    """
+    Parse byte counts with optional K/M/G suffixes.
+    """
+
     mem = mem.strip().upper()
     if not mem[-1].isalpha():
         return int(mem)
@@ -56,6 +78,10 @@ EnvMem = partial(EnvVar[int], fn=_PARSE_MEM_BYTES)
 
 
 class EnvClassSingleton:
+    """
+    Singleton registry whose uppercase attributes become ``MINISGL_*`` env vars.
+    """
+
     _instance: EnvClassSingleton | None = None
 
     # shell
@@ -70,12 +96,20 @@ class EnvClassSingleton:
     PYNCCL_MAX_BUFFER_SIZE = EnvMem(1024**3)
 
     def __new__(cls):
+        """
+        Return the single environment registry instance.
+        """
+
         # single instance
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self) -> None:
+        """
+        Initialize every registered env var from process environment.
+        """
+
         for attr_name in dir(self):
             if attr_name.startswith("_"):
                 continue

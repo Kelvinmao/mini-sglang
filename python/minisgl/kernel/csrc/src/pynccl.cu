@@ -16,6 +16,13 @@
 #include <string_view>
 #include <unordered_map>
 
+// TVM FFI wrapper around a small subset of NCCL collectives.
+//
+// Mini-SGLang can call this communicator directly from the active CUDA stream
+// without routing tensor-parallel collectives through torch.distributed's NCCL
+// process group. For small all-reduces, it optionally stages through a
+// symmetric NCCL window buffer registered at construction time.
+
 namespace {
 
 using NCCLIDList = tvm::ffi::Array<char>;
@@ -27,6 +34,8 @@ auto NCCL_CHECK(::ncclResult_t result) -> void {
 }
 
 auto get_uid(const NCCLIDList &wrapper) -> ncclUniqueId {
+  // Python broadcasts the unique ID as a TVM array of bytes so ranks can
+  // initialize the same communicator without exposing NCCL types to Python.
   host::RuntimeCheck(wrapper.size() == NCCL_UNIQUE_ID_BYTES,
                      "Invalid NCCL ID wrapper size");
   ncclUniqueId id;
@@ -82,6 +91,8 @@ public:
     NCCL_CHECK(::ncclMemAlloc(&buf, max_bytes));
     m_sym_mem = {buf, template_fn<::ncclMemFree>};
 
+    // Registering a symmetric window allows NCCL to use optimized paths for
+    // collectives that stage through the internal buffer.
     ncclWindow_t win;
     NCCL_CHECK(::ncclCommWindowRegister(comm, buf, max_bytes, &win,
                                         NCCL_WIN_COLL_SYMMETRIC));
@@ -122,6 +133,8 @@ public:
                                      ::cudaMemcpyDeviceToDevice, stream));
       }
     } else {
+      // Large tensors avoid the extra copies and reduce in place directly on
+      // the caller-provided buffer.
       NCCL_CHECK(::ncclAllReduce(
           /*sendbuff=*/data_ptr,
           /*recvbuff=*/data_ptr,

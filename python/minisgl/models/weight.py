@@ -1,3 +1,5 @@
+"""Streaming checkpoint loader with tensor-parallel sharding and fused-key remapping."""
+
 from __future__ import annotations
 
 import glob
@@ -32,10 +34,25 @@ _EXPERT_PATTERN = re.compile(r"^(?P<prefix>.+\.experts)\.(?P<idx>\d+)\.(?P<name>
 
 
 def _shard_tensor(key: str, value: torch.Tensor, r: int, n: int, num_kv_heads: int):
-    """Extract rank r's shard from a single tensor. Returns a contiguous copy."""
+    """
+    Extract rank ``r``'s shard from one checkpoint tensor.
+
+    Args:
+        key: Hugging Face checkpoint parameter name.
+        value: Full tensor loaded from a safetensors shard.
+        r: Tensor-parallel rank.
+        n: Tensor-parallel world size.
+        num_kv_heads: Number of model KV heads for GQA/MQA sharding.
+
+    Returns:
+        Rank-local tensor, copied when slicing is required.
+    """
+
     if any(key.count(sub) for sub in _SPLIT_DIM_0):
         is_kv_proj = any(key.count(sub) for sub in (".k_proj", ".v_proj"))
         if is_kv_proj and num_kv_heads is not None and num_kv_heads < n:
+            # With fewer KV heads than TP ranks, ranks share replicated KV
+            # shards instead of splitting a head across devices.
             head_dim = value.shape[0] // num_kv_heads
             head_idx = r * num_kv_heads // n
             return value[head_idx * head_dim : (head_idx + 1) * head_dim].clone()
@@ -53,7 +70,10 @@ def _shard_tensor(key: str, value: torch.Tensor, r: int, n: int, num_kv_heads: i
 
 
 def _get_merge_info(key: str):
-    """If key belongs to a merge group, return (merged_key, slot, all_slots). Else None."""
+    """
+    Return fused runtime-key information for checkpoint tensors that are merged.
+    """
+
     for suffix, (fused_suffix, slots) in _MERGE_GROUPS.items():
         if key.count(suffix):
             return key.replace(suffix, fused_suffix), _SLOT_NAMES[suffix], slots
@@ -61,7 +81,10 @@ def _get_merge_info(key: str):
 
 
 def _get_expert_stack_info(key: str) -> tuple[str, int] | None:
-    """Map an expert-scoped checkpoint key to the packed runtime key."""
+    """
+    Map an expert-scoped checkpoint key to the packed runtime key.
+    """
+
     match = _EXPERT_PATTERN.match(key)
     if match is None:
         return None
@@ -73,8 +96,21 @@ def _get_expert_stack_info(key: str) -> tuple[str, int] | None:
 
 
 def load_weight(model_path: str, device: torch.device) -> Iterator[Tuple[str, torch.Tensor]]:
-    """Streaming weight loader. Yields (name, tensor) pairs already sharded, merged,
-    and on device. Peak CPU memory: one full tensor + a small merge buffer."""
+    """
+    Stream model weights as rank-local runtime tensors.
+
+    The loader shards tensors for tensor parallelism, merges checkpoint Q/K/V
+    and gate/up projections into fused runtime parameters, and stacks MoE expert
+    tensors into packed expert weights.
+
+    Args:
+        model_path: Hugging Face model id or local model directory.
+        device: Device to load tensors onto.
+
+    Yields:
+        ``(name, tensor)`` pairs ready for ``load_state_dict`` on this rank.
+    """
+
     from .config import ModelConfig
 
     model_folder = download_hf_weight(model_path)
@@ -104,6 +140,8 @@ def load_weight(model_path: str, device: torch.device) -> Iterator[Tuple[str, to
                     merge_buf.setdefault(merged_key, {})[slot] = tensor
                     if not all(s in merge_buf[merged_key] for s in all_slots):
                         continue
+                    # Runtime layers consume fused QKV and gate/up tensors, so
+                    # checkpoint shards are buffered until every slot is loaded.
                     parts = [merge_buf[merged_key][s] for s in all_slots]
                     del merge_buf[merged_key]
                     out = (merged_key, torch.cat(parts, dim=0))

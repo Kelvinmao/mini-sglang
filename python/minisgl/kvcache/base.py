@@ -1,3 +1,5 @@
+"""Interfaces for physical KV-cache storage and logical prefix reuse."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,8 +11,10 @@ import torch
 
 class BaseKVCachePool(ABC):
     """
-    Base class for key-value caches.
-    This class defines the interface for key-value caches used.
+    Physical KV-cache storage used by attention backends.
+
+    Implementations own the layer-major K/V tensors and expose layer slices in
+    the layout expected by the selected attention kernel.
     """
 
     @abstractmethod
@@ -39,6 +43,14 @@ class BaseKVCachePool(ABC):
 
 @dataclass(frozen=True)
 class BaseCacheHandle(ABC):
+    """
+    Opaque handle to a matched prefix-cache entry.
+
+    ``cached_len`` is the length of the logical token prefix represented by the
+    handle. Implementations carry whatever tree/list pointer is needed to
+    recover physical KV locations.
+    """
+
     cached_len: int
 
     @abstractmethod
@@ -46,25 +58,48 @@ class BaseCacheHandle(ABC):
 
 
 class SizeInfo(NamedTuple):
+    """
+    Token-slot accounting for prefix-cache capacity management.
+    """
+
     evictable_size: int
     protected_size: int
 
     @property
     def total_size(self) -> int:
+        """
+        Return total token slots owned by the prefix cache.
+        """
+
         return self.evictable_size + self.protected_size
 
 
 class InsertResult(NamedTuple):
+    """
+    Result returned after inserting a request prefix into the prefix cache.
+    """
+
     cached_len: int  # length already in cache before insertion (should be freed)
     handle: BaseCacheHandle  # cache handle for the inserted prefix
 
 
 class MatchResult(NamedTuple):
+    """
+    Result returned by prefix lookup.
+    """
+
     cuda_handle: BaseCacheHandle
     # TODO: support HiCache
 
 
 class BasePrefixCache(ABC):
+    """
+    Logical prefix cache used to share KV-cache pages across requests.
+
+    The prefix cache does not allocate memory itself. It indexes token prefixes
+    and stores the physical token slots supplied by ``CacheManager``.
+    """
+
     @abstractmethod
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
         """
@@ -75,8 +110,8 @@ class BasePrefixCache(ABC):
         Otherwise it may be evicted by calling evict.
 
         Args:
-            handle (BaseCacheHandle): The cache handle to lock or unlock.
-            unlock (bool): Whether to unlock the handle. Defaults to False.
+            handle: The cache handle to lock or unlock.
+            unlock: Whether to unlock the handle. Defaults to False.
         """
 
     @abstractmethod
@@ -87,9 +122,10 @@ class BasePrefixCache(ABC):
         The returned indices is only safe to use when the handle is locked.
 
         Args:
-            input_ids (torch.Tensor): The input ids to match. Shape: (seq_len,)
+            input_ids: The input ids to match. Shape: ``(seq_len,)``.
+
         Returns:
-            MatchResult: The match result containing the cache handles.
+            The match result containing the cache handles.
         """
 
     @abstractmethod
@@ -98,11 +134,11 @@ class BasePrefixCache(ABC):
         Insert a new prefix into the cache.
         This operation will modify the cache.
         Args:
-            input_ids (torch.Tensor): The input ids to insert. Shape: (seq_len,)
-            indices (torch.Tensor): The indices to store the new prefix. Shape: (seq_len,)
+            input_ids: The input ids to insert. Shape: ``(seq_len,)``.
+            indices: The physical KV-cache indices. Shape: ``(seq_len,)``.
 
         Returns:
-            InsertResult: The result of the insertion.
+            The result of the insertion.
         """
 
     @abstractmethod
@@ -113,10 +149,11 @@ class BasePrefixCache(ABC):
         Note that evict 0 is always safe and does nothing.
         Note that the actual evict size may be larger than the requested size.
         Args:
-            size (int): The size to evict.
+            size: Number of token slots to evict.
 
         Returns:
-            torch.Tensor: The indices evicted. Shape: (evict_size,)
+            The physical token indices evicted. Shape: ``(evict_size,)``.
+
         Raises:
             RuntimeError: If the requested size is larger than the evictable size.
         """

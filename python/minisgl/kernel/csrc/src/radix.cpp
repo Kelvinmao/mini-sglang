@@ -7,6 +7,12 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/object.h>
 
+// CPU-side helper for radix-cache prefix matching.
+//
+// Prefix matching happens while scheduling on CPU tensors. Implementing the
+// first-difference scan in C++ avoids Python-level loops over token ids and is
+// still cheap enough to call during every radix-tree walk.
+
 namespace {
 
 auto _is_1d_cpu_int_tensor(const tvm::ffi::TensorView tensor) -> bool {
@@ -31,6 +37,9 @@ auto fast_compare_key(const tvm::ffi::TensorView a,
         std::mismatch(a_ptr_64, a_ptr_64 + common_len, b_ptr_64);
     return static_cast<size_t>(diff_pos.first - a_ptr_64);
   } else {
+    // Return ``common_len`` when no mismatch is found, matching
+    // ``std::mismatch`` semantics and letting Python align the result to a
+    // cache page boundary.
     const auto a_ptr_32 = static_cast<const int32_t *>(a_ptr);
     const auto b_ptr_32 = static_cast<const int32_t *>(b_ptr);
     const auto diff_pos =

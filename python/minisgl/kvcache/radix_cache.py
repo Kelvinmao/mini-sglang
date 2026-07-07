@@ -1,3 +1,11 @@
+"""Radix-tree prefix cache for KV-cache reuse.
+
+Each tree edge stores a contiguous token span and the matching physical
+KV-cache token indices. Handles point at tree nodes, while reference counts
+protect paths currently used by live requests. Eviction removes the oldest
+unprotected leaves first.
+"""
+
 from __future__ import annotations
 
 import heapq
@@ -15,9 +23,25 @@ KEY_FN: TypeAlias = Callable[[torch.Tensor], Any]
 
 
 class RadixTreeNode:
+    """
+    One compressed edge in the radix prefix tree.
+
+    ``_key`` and ``_value`` have the same length: tokens on the edge and their
+    physical KV-cache locations. The full prefix for a node is reconstructed by
+    walking from the node to the root.
+    """
+
     counter: int = 0
 
     def __init__(self, key_fn: KEY_FN, tic: int | None = None) -> None:
+        """
+        Create an empty node with an LRU timestamp.
+
+        Args:
+            key_fn: Function that maps a token slice to a child-map key.
+            tic: Optional timestamp inherited when splitting a node.
+        """
+
         self.key_fn = key_fn
         self.children: Dict[Any, RadixTreeNode] = {}
         self._parent: RadixTreeNode | None = None
@@ -32,44 +56,89 @@ class RadixTreeNode:
         self._length: int
 
     def set_key_value(self, key: torch.Tensor, value: torch.Tensor) -> None:
+        """
+        Store the compressed edge token span and physical KV-cache locations.
+        """
+
         assert len(key) == len(value)
         self._key = key
         self._value = value
         self._length = len(key)
 
     def set_parent(self, parent: RadixTreeNode) -> None:
+        """
+        Attach this node under ``parent`` using its first page as child key.
+        """
+
         self._parent = parent
         parent.children[self.key_fn(self._key)] = self
 
     @property
     def length(self) -> int:
+        """
+        Return the number of token slots represented by this edge.
+        """
+
         return self._length
 
     @property
     def parent(self) -> RadixTreeNode:
+        """
+        Return the parent node.
+        """
+
         assert self._parent is not None
         return self._parent
 
     @property
     def value(self) -> torch.Tensor:
+        """
+        Return physical KV-cache indices stored on this edge.
+        """
+
         return self._value
 
     def is_root(self) -> bool:
+        """
+        Return whether this is the tree root.
+        """
+
         return self._parent is None
 
     def is_leaf(self) -> bool:
+        """
+        Return whether this node has no children.
+        """
+
         return len(self.children) == 0
 
     def get_match_len(self, input_ids: torch.Tensor) -> int:
+        """
+        Return the common-prefix length between this edge and ``input_ids``.
+        """
+
         from minisgl.kernel import fast_compare_key
 
         # compare key and input_ids, find the first diff
         return fast_compare_key(self._key, input_ids)
 
     def split_at(self, pos: int) -> RadixTreeNode:
+        """
+        Split this compressed edge and return the new prefix node.
+
+        Args:
+            pos: Split position inside this node's edge.
+
+        Returns:
+            New parent node containing the shared prefix.
+        """
+
         assert 0 < pos < self.length
         parent = self.parent
 
+        # The new node takes this node's place under the old parent. The current
+        # node is then rewritten to contain only the suffix and reattached below
+        # the new prefix node.
         new_node = RadixTreeNode(self.key_fn, self.timestamp)
         new_node.set_key_value(self._key[:pos], self._value[:pos])
         new_node.set_parent(parent)
@@ -81,14 +150,26 @@ class RadixTreeNode:
         return new_node
 
     def __lt__(self, other: RadixTreeNode) -> bool:
+        """
+        Order nodes by timestamp for heap-based LRU eviction.
+        """
+
         return self.timestamp < other.timestamp
 
 
 @dataclass(frozen=True)
 class RadixCacheHandle(BaseCacheHandle):
+    """
+    Prefix-cache handle for a node in the radix tree.
+    """
+
     node: RadixTreeNode
 
     def get_matched_indices(self) -> torch.Tensor:
+        """
+        Return physical KV-cache indices for the matched prefix.
+        """
+
         node = self.node
         value_list: List[torch.Tensor] = []
         while not node.is_root():
@@ -100,6 +181,13 @@ class RadixCacheHandle(BaseCacheHandle):
 
 class RadixPrefixCache(BasePrefixCache):
     def __init__(self, device: torch.device):
+        """
+        Initialize an empty radix prefix cache on one scheduler rank.
+
+        Args:
+            device: Device where physical KV-cache indices live.
+        """
+
         super().__init__()
         self.device = device
         self.page_size = get_global_ctx().page_size
@@ -111,6 +199,15 @@ class RadixPrefixCache(BasePrefixCache):
         self.root_node.ref_count = 1  # root is always protected
 
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
+        """
+        Protect or release all nodes on a handle's prefix path.
+
+        Args:
+            handle: Prefix-cache handle returned by ``match_prefix`` or
+                ``insert_prefix``.
+            unlock: If true, decrement reference counts instead of incrementing.
+        """
+
         assert isinstance(handle, RadixCacheHandle)
         node = handle.node
         if unlock:
@@ -130,10 +227,18 @@ class RadixPrefixCache(BasePrefixCache):
                 node = node.parent
 
     def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
+        """
+        Find the longest cached prefix for ``input_ids``.
+        """
+
         node, prefix_len = self._tree_walk(input_ids)
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
     def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
+        """
+        Insert a page-aligned prefix and return a handle to the resulting node.
+        """
+
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
         node, prefix_len = self._tree_walk(input_ids)
@@ -146,6 +251,16 @@ class RadixPrefixCache(BasePrefixCache):
         return InsertResult(prefix_len, RadixCacheHandle(insert_len, node))
 
     def evict(self, size: int) -> torch.Tensor:
+        """
+        Evict least-recently-used unprotected leaf nodes.
+
+        Args:
+            size: Minimum number of token slots to evict.
+
+        Returns:
+            Physical KV-cache token indices owned by evicted nodes.
+        """
+
         if size == 0:
             return self.empty_tensor
         assert (
@@ -169,25 +284,43 @@ class RadixPrefixCache(BasePrefixCache):
             parent = node.parent
             del parent.children[self.key_fn(node._key)]
             # NOTE: root is always protected, so won't be evicted
+            # If removing a leaf exposes an old unprotected parent as a leaf,
+            # it becomes eligible in the same eviction pass.
             if parent.is_leaf() and parent.ref_count == 0:
                 heapq.heappush(leave_nodes, parent)
 
         return torch.cat(evicted_indices)
 
     def reset(self) -> None:
+        """
+        Clear the radix cache.
+        """
+
         raise NotImplementedError("RadixManager.reset is not implemented")
 
     @property
     def size_info(self) -> SizeInfo:
+        """
+        Return protected and evictable token-slot counts.
+        """
+
         return SizeInfo(
             evictable_size=self.evictable_size,
             protected_size=self.protected_size,
         )
 
     def check_integrity(self) -> None:
+        """
+        Validate radix-tree invariants.
+        """
+
         pass
 
     def _collect_leave_nodes_for_evict(self) -> List[RadixTreeNode]:
+        """
+        Collect currently evictable leaf nodes.
+        """
+
         nodes: List[RadixTreeNode] = [self.root_node]
         leave_nodes: List[RadixTreeNode] = []
 
@@ -203,6 +336,16 @@ class RadixPrefixCache(BasePrefixCache):
         return leave_nodes
 
     def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+        """
+        Walk the radix tree, splitting edges when a partial page-aligned match occurs.
+
+        Args:
+            input_ids: Page-aligned token ids to match or insert.
+
+        Returns:
+            Tuple of the deepest matching node and the matched token length.
+        """
+
         prefix_len = 0
         indice_len = len(input_ids)
         node = self.root_node
@@ -232,6 +375,10 @@ class RadixPrefixCache(BasePrefixCache):
 
 
 def _get_key_fn(page_size: int) -> KEY_FN:
+    """
+    Return the child-map key function for a configured cache page size.
+    """
+
     if page_size == 1:
         return lambda x: x[0].item()
     return lambda x: tuple(x[:page_size].tolist())

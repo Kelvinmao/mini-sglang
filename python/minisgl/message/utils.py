@@ -1,3 +1,5 @@
+"""Small msgpack-friendly serializer for dataclass-like control messages."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Type
@@ -7,6 +9,10 @@ import torch
 
 
 def _serialize_any(value: Any) -> Any:
+    """
+    Recursively convert supported Python objects to msgpack-safe values.
+    """
+
     if isinstance(value, dict):
         return {k: _serialize_any(v) for k, v in value.items()}
     elif isinstance(value, (list, tuple)):
@@ -18,10 +24,17 @@ def _serialize_any(value: Any) -> Any:
 
 
 def serialize_type(self) -> Dict:
+    """
+    Serialize tensors and message objects into dictionaries with type tags.
+    """
+
     # find all member variables
     serialized = {}
 
     if isinstance(self, torch.Tensor):
+        # Control-plane tensors are restricted to 1D CPU tensors. That keeps
+        # msgpack payloads simple and avoids accidentally copying large GPU data
+        # through ZMQ.
         assert self.dim() == 1, "we can only serialize 1D tensor for now"
         serialized["__type__"] = "Tensor"
         serialized["buffer"] = self.numpy().tobytes()
@@ -36,6 +49,10 @@ def serialize_type(self) -> Dict:
 
 
 def _deserialize_any(cls_map: Dict[str, Type], data: Any) -> Any:
+    """
+    Recursively rebuild values produced by ``_serialize_any``.
+    """
+
     if isinstance(data, dict):
         if "__type__" in data:
             return deserialize_type(cls_map, data)
@@ -50,6 +67,10 @@ def _deserialize_any(cls_map: Dict[str, Type], data: Any) -> Any:
 
 
 def deserialize_type(cls_map: Dict[str, Type], data: Dict) -> Any:
+    """
+    Reconstruct a tensor or message object from a serialized type tag.
+    """
+
     type_name = data["__type__"]
     # we can only serialize 1D tensor for now
     if type_name == "Tensor":

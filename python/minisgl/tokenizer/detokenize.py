@@ -1,10 +1,10 @@
+"""Incremental detokenization helpers for streaming output."""
+
 from dataclasses import dataclass
 from typing import Dict, List
 
 from minisgl.message import DetokenizeMsg
 from transformers import PreTrainedTokenizerBase
-
-# Borrowed from sglang
 
 
 def _is_chinese_char(cp: int):
@@ -53,6 +53,10 @@ def find_printable_text(text: str):
 
 @dataclass
 class DecodeStatus:
+    """
+    Per-request offsets used to stream only printable new text.
+    """
+
     decoded_ids: List[int]
     decoded_str: str
     read_offset: int  # length of read ids
@@ -62,12 +66,20 @@ class DecodeStatus:
 
 class DetokenizeManager:
     def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        """
+        Initialize detokenization state for a tokenizer worker.
+        """
+
         # uid -> DecodeStatus
         self.decode_map: Dict[int, DecodeStatus] = {}
         self.tokenizer = tokenizer
         self.eos_token_id = self.tokenizer.eos_token_id
 
     def detokenize(self, msgs: List[DetokenizeMsg]) -> List[str]:
+        """
+        Decode one token per request and return incremental printable chunks.
+        """
+
         read_ids: List[List[int]] = []
         surr_ids: List[List[int]] = []
         for msg in msgs:
@@ -94,11 +106,16 @@ class DetokenizeManager:
             new_text = read_str[len(surr_str) :]
             # Streaming chunk: update the decode status
             if len(new_text) > 0 and not new_text.endswith("�"):
+                # The tokenizer produced a valid Unicode suffix. Commit it as
+                # stable text and move the surrounding-token window forward.
                 output_str = s.decoded_str + new_text
                 s.decoded_str = output_str
                 s.surr_offset = s.read_offset
                 s.read_offset = len(s.decoded_ids)
             else:
+                # Byte-level tokenizers can temporarily decode to the
+                # replacement character. Keep a small surrounding window and
+                # only emit text that looks stable to clients.
                 new_text = find_printable_text(new_text)
                 output_str = s.decoded_str + new_text
 

@@ -1,3 +1,5 @@
+"""Fused mixture-of-experts routing and expert GEMM helpers."""
+
 import functools
 from typing import Dict, Tuple
 
@@ -13,6 +15,10 @@ def fused_topk(
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Select top-k experts per token with SGLang's fused top-k softmax kernel.
+    """
+
     from sgl_kernel import topk_softmax
 
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
@@ -23,6 +29,8 @@ def fused_topk(
     if renormalize:
         topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
     if num_token_non_padded is not None:
+        # CUDA graph padding may create artificial tokens. Mark their experts as
+        # invalid so downstream expert kernels ignore them.
         indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
         topk_ids[indices >= num_token_non_padded, :] = -1
     return topk_weights, topk_ids
@@ -96,6 +104,9 @@ def get_default_config(
     K: int,
     topk: int,
 ) -> Dict[str, int]:
+    """
+    Return conservative Triton block sizes for the fused MoE kernels.
+    """
 
     config = {
         "BLOCK_SIZE_M": 64,
@@ -119,6 +130,10 @@ def try_get_optimal_moe_config(
     top_k: int,
     M: int,
 ) -> Dict[str, int]:
+    """
+    Choose a fused-MoE kernel configuration for current tensor shapes.
+    """
+
     E, _, N = w2_shape
     config = get_default_config(M, E, N, w1_shape[2], top_k)
     return config
@@ -133,6 +148,14 @@ def fused_experts_impl(
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
+    """
+    Run fused expert computation for routed tokens.
+
+    The implementation packs ``topk`` routed token copies by expert, runs the
+    first expert projection, applies the activation, runs the second projection,
+    then reduces each token's expert outputs back into the original order.
+    """
+
     from minisgl.kernel import fused_moe_kernel_triton, moe_sum_reduce_triton
     from minisgl.layers import gelu_and_mul, silu_and_mul
 
@@ -159,6 +182,8 @@ def fused_experts_impl(
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
+    # Reuse one contiguous scratch buffer for the two GEMM stages where shapes
+    # do not overlap. This reduces allocation churn in decode-heavy workloads.
     intermediate_cache1 = cache[: M * topk_ids.shape[1] * N].view(
         (M, topk_ids.shape[1], N),
     )
@@ -228,6 +253,10 @@ def fused_experts_impl(
 
 
 class FusedMoe(BaseMoeBackend):
+    """
+    MoE backend that routes tokens and runs fused expert kernels.
+    """
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -239,6 +268,10 @@ class FusedMoe(BaseMoeBackend):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
     ) -> torch.Tensor:
+        """
+        Route tokens through top-k experts and return combined hidden states.
+        """
+
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
             gating_output=gating_output,

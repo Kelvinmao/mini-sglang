@@ -1,3 +1,5 @@
+"""Tensor-parallel linear layer variants."""
+
 from __future__ import annotations
 
 from typing import List
@@ -21,6 +23,10 @@ class _LinearTPImpl(BaseOP):
         local_osize: int,
         has_bias: bool,
     ):
+        """
+        Store full and rank-local dimensions for weight loading.
+        """
+
         self.full_input_size = full_isize
         self.full_output_size = full_osize
         self.local_input_size = local_isize
@@ -29,6 +35,10 @@ class _LinearTPImpl(BaseOP):
         self.bias = torch.empty(local_osize) if has_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the local linear projection.
+        """
+
         return F.linear(x, self.weight, self.bias)
 
 
@@ -54,12 +64,20 @@ class LinearReplicated(_LinearTPImpl):
 
 
 class LinearColParallelMerged(_LinearTPImpl):
+    """
+    Column-parallel projection with multiple output groups fused together.
+    """
+
     def __init__(
         self,
         input_size: int,
         output_sizes: List[int],
         has_bias: bool,
     ):
+        """
+        Split each fused output group across tensor-parallel ranks.
+        """
+
         # check that all output sizes are divisible by tp_size
         tp_info = get_tp_info()
         tp_output_sizes = [div_even(size, tp_info.size) for size in output_sizes]
@@ -69,6 +87,10 @@ class LinearColParallelMerged(_LinearTPImpl):
 
 
 class LinearQKVMerged(_LinearTPImpl):
+    """
+    Column-parallel QKV projection with special handling for GQA/MQA KV heads.
+    """
+
     def __init__(
         self,
         hidden_size: int,
@@ -77,6 +99,10 @@ class LinearQKVMerged(_LinearTPImpl):
         num_kv_heads: int,
         has_bias: bool,
     ):
+        """
+        Compute rank-local Q and KV projection sizes.
+        """
+
         tp_info = get_tp_info()
 
         local_num_qo = div_even(num_qo_heads, tp_info.size)
@@ -89,7 +115,15 @@ class LinearQKVMerged(_LinearTPImpl):
 
 
 class LinearOProj(_LinearTPImpl):
+    """
+    Row-parallel attention output projection followed by all-reduce.
+    """
+
     def __init__(self, input_size: int, output_size: int, has_bias: bool):
+        """
+        Split the input dimension across tensor-parallel ranks.
+        """
+
         tp_info = get_tp_info()
         full_isize = input_size
         full_osize = output_size
@@ -100,6 +134,10 @@ class LinearOProj(_LinearTPImpl):
         super().__init__(full_isize, full_osize, local_isize, local_osize, has_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply local projection and sum partial outputs across ranks.
+        """
+
         y = F.linear(x, self.weight, self.bias)
         if self._tp_size > 1:
             y = self._comm.all_reduce(y)
@@ -107,12 +145,20 @@ class LinearOProj(_LinearTPImpl):
 
 
 class LinearRowParallel(_LinearTPImpl):
+    """
+    Generic row-parallel linear layer followed by all-reduce.
+    """
+
     def __init__(
         self,
         input_size: int,
         output_size: int,
         has_bias: bool,
     ):
+        """
+        Split input features across tensor-parallel ranks.
+        """
+
         tp_info = get_tp_info()
         local_input_size = div_even(input_size, tp_info.size)
         local_output_size = output_size
@@ -121,6 +167,10 @@ class LinearRowParallel(_LinearTPImpl):
         super().__init__(input_size, output_size, local_input_size, local_output_size, has_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply local projection and sum partial outputs across ranks.
+        """
+
         y = F.linear(x, self.weight, self.bias)
         if self._tp_size > 1:
             y = self._comm.all_reduce(y)

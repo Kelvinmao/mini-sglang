@@ -1,3 +1,5 @@
+"""Python wrapper for the JIT-specialized row-index CUDA kernel."""
+
 from __future__ import annotations
 
 import functools
@@ -19,6 +21,10 @@ def _jit_index_module(
     num_splits: int = 1,
     config: KernelConfig = DEFAULT_INDEX_KERNEL_CONFIG,
 ) -> Module:
+    """
+    Compile or retrieve a row-index kernel specialization.
+    """
+
     args = make_cpp_args(element_size, num_splits, *config)
     return load_jit(
         "index",
@@ -35,10 +41,16 @@ def indexing(
     output: torch.Tensor | None = None,
     vocab_range: Tuple[int, int] | None = None,  # (start, length)
 ) -> torch.Tensor:
+    """
+    Gather rows from ``weights`` using a custom warp-copy kernel.
+    """
+
     if output is None:
         output = weights.new_empty(indices.shape[0], weights.shape[1])
 
     element_size = weights.shape[1] * weights.element_size()
+    # Large rows are split across multiple warps to keep each warp's copy size
+    # manageable while preserving one logical output row per index.
     if element_size % 2048 == 0:
         num_splits = 4
     elif element_size % 1024 == 0:

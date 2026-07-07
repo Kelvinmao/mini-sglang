@@ -1,3 +1,5 @@
+"""Python wrapper for the JIT-specialized KV-cache store CUDA kernel."""
+
 from __future__ import annotations
 
 import functools
@@ -18,6 +20,10 @@ def _jit_store_module(
     *,
     config: KernelConfig = DEFAULT_INDEX_KERNEL_CONFIG,
 ) -> Module:
+    """
+    Compile or retrieve a KV-store kernel specialization.
+    """
+
     args = make_cpp_args(element_size, *config)
     return load_jit(
         "store",
@@ -34,6 +40,10 @@ def store_cache(
     k: torch.Tensor,
     v: torch.Tensor,
 ) -> None:
+    """
+    Store K/V rows into physical cache slots.
+    """
+
     num_tokens = k_cache.shape[0]
     k_cache = k_cache.view(num_tokens, -1)
     v_cache = v_cache.view(num_tokens, -1)

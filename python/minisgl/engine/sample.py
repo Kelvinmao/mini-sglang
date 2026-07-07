@@ -1,3 +1,5 @@
+"""Sampling helpers used after model logits are produced."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,12 +14,20 @@ if TYPE_CHECKING:
 
 @dataclass
 class BatchSamplingArgs:
+    """
+    Device-side sampling tensors for one scheduled batch.
+    """
+
     temperatures: torch.Tensor | None
     top_k: torch.Tensor | None = None
     top_p: torch.Tensor | None = None
 
 
 def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """
+    Create a pinned-host tensor and transfer it asynchronously to ``device``.
+    """
+
     return torch.tensor(data, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
 
 
@@ -27,6 +37,10 @@ def sample_impl(
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
 ) -> torch.Tensor:
+    """
+    Run FlashInfer sampling for non-greedy requests.
+    """
+
     import flashinfer.sampling as sampling
 
     probs = sampling.softmax(logits, temperatures, enable_pdl=is_sm90_supported())
@@ -47,10 +61,18 @@ def sample_impl(
 
 @dataclass
 class Sampler:
+    """
+    Prepares per-request sampling parameters and samples next-token ids.
+    """
+
     device: torch.device
     vocab_size: int
 
     def prepare(self, batch: Batch) -> BatchSamplingArgs:
+        """
+        Convert request sampling params into compact device tensors.
+        """
+
         params = [r.sampling_params for r in batch.reqs]
         if all(p.is_greedy for p in params):
             return BatchSamplingArgs(temperatures=None)
@@ -69,6 +91,10 @@ class Sampler:
 
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
+        """
+        Sample next tokens from logits, using argmax for all-greedy batches.
+        """
+
         with torch.cuda.nvtx.range("Sampler"):
             if args.temperatures is None:  # greedy sampling
                 return torch.argmax(logits, dim=-1)

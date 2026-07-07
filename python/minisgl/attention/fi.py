@@ -1,3 +1,5 @@
+"""FlashInfer-backed attention implementation."""
+
 from __future__ import annotations
 
 import math
@@ -24,6 +26,10 @@ if TYPE_CHECKING:
 
 
 def _next_power_of_2(n: int) -> int:
+    """
+    Return the next power-of-two capacity for reusable pinned CPU buffers.
+    """
+
     if n <= 1:
         return 1
     return 1 << math.ceil(math.log2(n))
@@ -34,17 +40,37 @@ logger = init_logger(__name__)
 
 @dataclass
 class FICaptureData(BaseCaptureData):
+    """
+    Fixed metadata buffers for FlashInfer CUDA graph decode.
+    """
+
     @property
     def one_tensor(self) -> torch.Tensor:
+        """
+        Return a reusable all-ones buffer for ``last_page_len``.
+        """
+
         return self.seq_lens
 
     @property
     def indices(self) -> torch.Tensor:
+        """
+        Return flattened page-table indices expected by FlashInfer graph wrappers.
+        """
+
         return self.page_table
 
 
 @dataclass
 class FIMetadata(BaseAttnMetadata):
+    """
+    FlashInfer planning metadata for one batch.
+
+    FlashInfer's plan step consumes several CPU tensors and asynchronously
+    copies data to internal GPU buffers. ``initialized`` records whether that
+    plan has already run for this metadata object.
+    """
+
     # fmt: off
     cu_seqlens_q_cpu:   torch.Tensor  # on cpu
     cu_seqlens_k_cpu:   torch.Tensor  # on cpu
@@ -63,6 +89,10 @@ class FIMetadata(BaseAttnMetadata):
     # fmt: on
 
     def __post_init__(self) -> None:
+        """
+        Validate device placement assumptions required by FlashInfer planning.
+        """
+
         assert self.page_size == 1, "Currently only page_size=1 is supported."
         assert (
             self.cu_seqlens_k_cpu.is_cpu
@@ -74,11 +104,23 @@ class FIMetadata(BaseAttnMetadata):
         )
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
+        """
+        Return flattened query indices corresponding to last tokens.
+        """
+
         return self.cu_seqlens_q_gpu[1 : 1 + bs] - 1
 
 
 class FlashInferBackend(BaseAttnBackend):
+    """
+    Attention backend using FlashInfer paged KV-cache wrappers.
+    """
+
     def __init__(self, config: ModelConfig) -> None:
+        """
+        Initialize FlashInfer wrappers and shared workspaces.
+        """
+
         from flashinfer import (
             BatchDecodeWithPagedKVCacheWrapper,
             BatchPrefillWithPagedKVCacheWrapper,
@@ -121,6 +163,10 @@ class FlashInferBackend(BaseAttnBackend):
         self.last_event.record()
 
     def _initialize_metadata_once(self, metadata: FIMetadata) -> None:
+        """
+        Run FlashInfer planning once for a metadata object.
+        """
+
         if metadata.initialized:
             return
 
@@ -166,6 +212,10 @@ class FlashInferBackend(BaseAttnBackend):
         self.last_event.record()
 
     def _get_ones_cpu(self, bs: int) -> torch.Tensor:
+        """
+        Return a pinned CPU vector of ones, reused across decode plans.
+        """
+
         if bs <= len(self.cached_ones_cpu):
             return self.cached_ones_cpu[:bs]
         # padding to next pow of 2
@@ -176,6 +226,10 @@ class FlashInferBackend(BaseAttnBackend):
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
     ) -> torch.Tensor:
+        """
+        Store new K/V rows and invoke the planned FlashInfer wrapper.
+        """
+
         def _flatten_cache(cache: torch.Tensor) -> torch.Tensor:  # treat page = 1
             return cache.view(-1, 1, cache.shape[2], cache.shape[3])
 
@@ -188,6 +242,10 @@ class FlashInferBackend(BaseAttnBackend):
         return metadata.wrapper.run(q=q, paged_kv_cache=kv_cache)
 
     def prepare_metadata(self, batch: Batch) -> None:
+        """
+        Build FlashInfer planning metadata for a scheduled batch.
+        """
+
         reqs = batch.padded_reqs
 
         padded_size = len(reqs)
@@ -203,6 +261,7 @@ class FlashInferBackend(BaseAttnBackend):
         if max_seqlen_q == 1:  # decode with all extend_len = 1
             cu_seqlens_q_cpu = torch.arange(0, padded_size + 1, **CPU_KWARGS)
         elif all(l == 0 for l in cached_lens):  # prefill with no cache hit
+            # Query spans and key spans are identical for a full uncached prefill.
             cu_seqlens_q_cpu = cu_seqlens_k_cpu
         else:  # normal extend prefill, with partial cache hit
             cu_seqlens_q_cpu = torch.tensor([0] + seqlens_q, **CPU_KWARGS).cumsum_(dim=0)
@@ -225,6 +284,10 @@ class FlashInferBackend(BaseAttnBackend):
         )
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+        """
+        Allocate fixed metadata buffers for CUDA graph decode.
+        """
+
         assert self.capture is None, "Capture already initialized."
         max_bs = max(bs_list)
         capture = FICaptureData.create(max_bs, max_seq_len, self.kvcache.device)
@@ -235,6 +298,10 @@ class FlashInferBackend(BaseAttnBackend):
 
     @cached_property
     def use_tensor_cores(self) -> bool:
+        """
+        Return whether FlashInfer should use tensor cores for decode.
+        """
+
         if (overriden_value := ENV.FLASHINFER_USE_TENSOR_CORES.value) is not None:
             logger.warning(f"Overriding FlashInfer tensor core usage to {overriden_value}")
             return overriden_value
@@ -242,6 +309,10 @@ class FlashInferBackend(BaseAttnBackend):
         return GQA >= 4
 
     def prepare_for_capture(self, batch: Batch) -> None:
+        """
+        Create and plan the graph wrapper for one captured batch size.
+        """
+
         from flashinfer import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
 
         bs = batch.size
@@ -264,6 +335,10 @@ class FlashInferBackend(BaseAttnBackend):
         self._initialize_metadata_once(metadata)
 
     def prepare_for_replay(self, batch: Batch) -> None:
+        """
+        Rebind replay metadata to the graph wrapper and run FlashInfer planning.
+        """
+
         metadata, bs = batch.attn_metadata, batch.padded_size
         assert isinstance(metadata, FIMetadata) and not metadata.initialized
         assert self.capture is not None and bs in self.capture_bs

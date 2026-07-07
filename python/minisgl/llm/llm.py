@@ -1,3 +1,5 @@
+"""In-process offline LLM interface built on top of the scheduler."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,18 +17,37 @@ from minisgl.scheduler import Scheduler, SchedulerConfig
 
 
 class RequestAllFinished(Exception):
+    """
+    Sentinel exception used to stop the inherited scheduler loop in offline mode.
+    """
+
     pass
 
 
 @dataclass
 class RequestStatus:
+    """
+    Accumulated prompt and generated tokens for one offline request.
+    """
+
     uid: int
     input_ids: List[int]
     output_ids: List[int]
 
 
 class LLM(Scheduler):
+    """
+    Single-process convenience wrapper around ``Scheduler``.
+
+    The class reuses the normal scheduler/engine path but overrides scheduler I/O
+    to feed requests from Python lists and collect generated token ids locally.
+    """
+
     def __init__(self, model_path: str, dtype: torch.dtype = torch.bfloat16, **kwargs):
+        """
+        Initialize an offline single-rank scheduler.
+        """
+
         config = SchedulerConfig(
             model_path=model_path,
             tp_info=DistributedInfo(0, 1),
@@ -40,12 +61,20 @@ class LLM(Scheduler):
         self.counter = 0
 
     def _tokenize_one(self, prompt: List[int] | str) -> torch.Tensor:
+        """
+        Convert a string prompt or explicit token ids into a CPU int32 tensor.
+        """
+
         if isinstance(prompt, str):
             return self.tokenizer.encode(prompt, return_tensors="pt").view(-1).to(torch.int32)
         else:
             return torch.tensor(prompt, dtype=torch.int32, device="cpu")
 
     def offline_receive_msg(self, blocking: bool = False) -> List[BaseBackendMsg]:
+        """
+        Feed pending offline prompts into the scheduler as backend messages.
+        """
+
         if blocking and len(self.pending_requests) == 0:
             raise RequestAllFinished()
         results: List[BaseBackendMsg] = []
@@ -69,6 +98,10 @@ class LLM(Scheduler):
         return results
 
     def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
+        """
+        Collect generated token ids from scheduler replies.
+        """
+
         for msg in reply:
             status = self.status_map[msg.uid]
             if not (msg.finished and msg.next_token == self.eos_token_id):
@@ -79,6 +112,18 @@ class LLM(Scheduler):
         prompts: List[str] | List[List[int]],
         sampling_params: List[SamplingParams] | SamplingParams,
     ) -> List[Dict[str, str | List[int]]]:
+        """
+        Generate text for a batch of prompts.
+
+        Args:
+            prompts: String prompts or already-tokenized prompt ids.
+            sampling_params: One parameter object shared by all prompts or one
+                parameter object per prompt.
+
+        Returns:
+            List of dictionaries containing decoded text and generated token ids.
+        """
+
         self.pending_requests = []
         self.status_map = {}
         self.counter = 0

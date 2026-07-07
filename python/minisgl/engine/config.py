@@ -1,3 +1,5 @@
+"""Engine configuration derived from server args and model metadata."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +16,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class EngineConfig:
+    """
+    Immutable configuration for one engine rank.
+    """
+
     model_path: str
     tp_info: DistributedInfo
     dtype: torch.dtype
@@ -32,24 +38,44 @@ class EngineConfig:
 
     @cached_property
     def hf_config(self):
+        """
+        Load and cache the Hugging Face model config.
+        """
+
         return cached_load_hf_config(self.model_path)
 
     @cached_property
     def model_config(self) -> ModelConfig:
+        """
+        Convert Hugging Face config into Mini-SGLang's normalized model config.
+        """
+
         from minisgl.models import ModelConfig
 
         return ModelConfig.from_hf(self.hf_config)
 
     @property
     def max_seq_len(self) -> int:
+        """
+        Return the maximum served sequence length.
+        """
+
         if self.max_seq_len_override is not None:
             return self.max_seq_len_override
         return self.model_config.rotary_config.max_position
 
     @property
     def max_forward_len(self) -> int:
+        """
+        Return maximum flattened token count for one forward.
+        """
+
         return self.max_seq_len
 
     @property
     def distributed_addr(self) -> str:
+        """
+        Return the torch.distributed initialization endpoint.
+        """
+
         return "tcp://127.0.0.1:2333"

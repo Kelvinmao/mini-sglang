@@ -1,3 +1,5 @@
+"""FlashAttention-backed attention implementation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,11 +18,24 @@ if TYPE_CHECKING:
 
 @dataclass
 class FACaptureData(BaseCaptureData):
+    """
+    Fixed metadata buffers for FlashAttention CUDA graph decode.
+    """
+
     pass
 
 
 @dataclass
 class FAMetadata(BaseAttnMetadata):
+    """
+    FlashAttention metadata for paged KV-cache reads.
+
+    ``cu_seqlens_q`` describes the flattened query tokens. ``cu_seqlens_k`` and
+    ``cache_seqlens`` describe all cached keys per request. ``page_table`` is
+    compacted to page ids when ``page_size > 1`` because the global scheduler
+    table stores token-level physical locations.
+    """
+
     cu_seqlens_k: torch.Tensor
     cu_seqlens_q: torch.Tensor
     cache_seqlens: torch.Tensor
@@ -30,11 +45,23 @@ class FAMetadata(BaseAttnMetadata):
     page_table: torch.Tensor
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
+        """
+        Return flattened query indices corresponding to last tokens.
+        """
+
         return self.cu_seqlens_q[1 : 1 + bs] - 1
 
 
 class FlashAttentionBackend(BaseAttnBackend):
+    """
+    Attention backend using ``sgl_kernel.flash_attn.flash_attn_with_kvcache``.
+    """
+
     def __init__(self, config: ModelConfig):
+        """
+        Initialize backend state from global context and model config.
+        """
+
         ctx = get_global_ctx()
         self.config = config
         self.kvcache = ctx.kv_cache
@@ -48,6 +75,10 @@ class FlashAttentionBackend(BaseAttnBackend):
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
     ) -> torch.Tensor:
+        """
+        Store new K/V rows and run FlashAttention against the paged cache.
+        """
+
         metadata = batch.attn_metadata
         assert isinstance(metadata, FAMetadata)
         self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
@@ -65,6 +96,10 @@ class FlashAttentionBackend(BaseAttnBackend):
         )
 
     def prepare_metadata(self, batch: Batch) -> None:
+        """
+        Build FlashAttention sequence metadata for a scheduled batch.
+        """
+
         reqs = batch.padded_reqs
 
         padded_size = len(reqs)
@@ -84,6 +119,8 @@ class FlashAttentionBackend(BaseAttnBackend):
         if max_seqlen_q == 1:
             cu_seqlens_q = torch.arange(0, padded_size + 1, device=device, dtype=torch.int32)
         elif all(l == 0 for l in cached_lens):  # prefill with no cache hit
+            # When there is no cached prefix, the flattened query and key spans
+            # are identical, so we can reuse the same cumulative lengths.
             cu_seqlens_q = cu_seqlens_k
         else:  # normal extend prefill, with partial cache hit
             cu_seqlens_q = torch.tensor([0] + seqlens_q, **CPU_KWARGS).cumsum_(dim=0)
@@ -105,6 +142,10 @@ class FlashAttentionBackend(BaseAttnBackend):
         )
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+        """
+        Allocate fixed metadata buffers for CUDA graph decode.
+        """
+
         assert self.capture is None, "Capture already initialized."
         max_bs = max(bs_list)
         capture = FACaptureData.create(max_bs, max_seq_len // self.page_size, self.kvcache.device)
@@ -113,6 +154,10 @@ class FlashAttentionBackend(BaseAttnBackend):
         self.capture_bs = sorted(bs_list)
 
     def prepare_for_capture(self, batch: Batch) -> None:
+        """
+        Attach fixed metadata buffers before capturing a decode graph.
+        """
+
         assert (bs := batch.size) in self.capture_bs and self.capture
         capture = self.capture
         metadata = FAMetadata(
@@ -126,6 +171,10 @@ class FlashAttentionBackend(BaseAttnBackend):
         batch.attn_metadata = metadata
 
     def prepare_for_replay(self, batch: Batch) -> None:
+        """
+        Copy dynamic decode metadata into capture buffers before graph replay.
+        """
+
         metadata, bs = batch.attn_metadata, batch.padded_size
         assert isinstance(metadata, FAMetadata)
         assert self.capture is not None and bs in self.capture_bs
@@ -154,6 +203,10 @@ def _fa_sgl_impl(
     pack_gqa: bool | None = None,  # Can be tuned for speed
     causal: bool = True,
 ) -> torch.Tensor:
+    """
+    Thin wrapper around SGLang's FlashAttention KV-cache kernel.
+    """
+
     try:
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
     except ImportError as e:

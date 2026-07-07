@@ -1,3 +1,5 @@
+"""CUDA graph capture and replay helpers for decode batches."""
+
 from __future__ import annotations
 
 import gc
@@ -19,6 +21,14 @@ logger = init_logger(__name__)
 
 @dataclass
 class GraphCaptureBuffer:
+    """
+    Stable device buffers referenced by captured CUDA graphs.
+
+    CUDA graphs capture memory addresses, not Python objects. Replay therefore
+    copies each dynamic batch into these fixed buffers and points the batch at
+    slices of them before invoking the captured graph.
+    """
+
     input_ids: torch.Tensor
     out_loc: torch.Tensor
     positions: torch.Tensor
@@ -26,6 +36,10 @@ class GraphCaptureBuffer:
 
     @classmethod
     def init(cls, bs: int, vocab_size: int, device: torch.device) -> GraphCaptureBuffer:
+        """
+        Allocate capture buffers for the largest graph batch size.
+        """
+
         return GraphCaptureBuffer(
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
@@ -34,12 +48,20 @@ class GraphCaptureBuffer:
         )
 
     def set_batch(self, batch: Batch) -> None:
+        """
+        Point a batch at capture buffers before graph capture.
+        """
+
         _slice = slice(batch.padded_size)
         batch.input_ids = self.input_ids[_slice]
         batch.out_loc = self.out_loc[_slice]
         batch.positions = self.positions[_slice]
 
     def copy_from(self, batch: Batch) -> None:
+        """
+        Copy dynamic scheduler tensors into capture buffers before replay.
+        """
+
         _slice = slice(batch.padded_size)
         self.input_ids[_slice] = batch.input_ids
         self.out_loc[_slice] = batch.out_loc
@@ -51,6 +73,10 @@ def _determine_cuda_graph_bs(
     cuda_graph_max_bs: int | None,
     free_memory: int,
 ) -> List[int]:
+    """
+    Select decode batch sizes to capture as CUDA graphs.
+    """
+
     if cuda_graph_bs is not None:
         return cuda_graph_bs
 
@@ -68,14 +94,30 @@ def _determine_cuda_graph_bs(
 
 
 def mem_GB(size: int) -> str:
+    """
+    Format bytes as GiB for log messages.
+    """
+
     return f"{size / (1024**3):.2f} GiB"
 
 
 def get_free_memory(device: torch.device) -> int:
+    """
+    Return currently free CUDA memory on ``device``.
+    """
+
     return torch.cuda.mem_get_info(device)[0]
 
 
 class GraphRunner:
+    """
+    Captures and replays decode-only CUDA graphs.
+
+    Prefill has variable sequence lengths and large prompt-dependent metadata,
+    so graph replay is used only for decode batches where each request extends
+    by one token.
+    """
+
     def __init__(
         self,
         stream: torch.cuda.Stream,
@@ -89,6 +131,10 @@ class GraphRunner:
         vocab_size: int,
         dummy_req: Req,
     ) -> None:
+        """
+        Initialize capture sizes and eagerly capture graph variants.
+        """
+
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
@@ -103,6 +149,10 @@ class GraphRunner:
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _capture_graphs(self, max_seq_len: int, vocab_size: int, model: BaseLLMModel):
+        """
+        Capture one CUDA graph for each configured padded decode batch size.
+        """
+
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
@@ -136,6 +186,8 @@ class GraphRunner:
             self.attn_backend.prepare_for_capture(batch)
             self.buffer.set_batch(batch)
             with get_global_ctx().forward_batch(batch):
+                # Warm up once before capture so backend planning and lazy
+                # allocations happen outside the graph.
                 self.buffer.logits[:bs] = model.forward()
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     self.buffer.logits[:bs] = model.forward()
@@ -147,9 +199,17 @@ class GraphRunner:
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
+        """
+        Return whether this batch can use a captured decode graph.
+        """
+
         return batch.is_decode and batch.size <= self.max_graph_bs
 
     def replay(self, batch: Batch) -> torch.Tensor:
+        """
+        Replay the graph variant matching ``batch.padded_size``.
+        """
+
         assert self.can_use_cuda_graph(batch)
         self.buffer.copy_from(batch)
         g = self.graph_map[batch.padded_size]
@@ -158,6 +218,10 @@ class GraphRunner:
         return self.buffer.logits[: batch.size]
 
     def pad_batch(self, batch: Batch) -> None:
+        """
+        Pad a real batch with dummy requests to the next captured graph size.
+        """
+
         padded_size = (  # choose the first available batch size
             next(bs for bs in self.graph_bs_list if bs >= batch.size)
             if self.can_use_cuda_graph(batch)
@@ -167,5 +231,9 @@ class GraphRunner:
 
     # NOTE: This must be called before freeing NCCL resources to prevent program hang
     def destroy_cuda_graphs(self) -> None:
+        """
+        Drop captured graphs before NCCL and process-group teardown.
+        """
+
         del self.graph_map
         gc.collect()

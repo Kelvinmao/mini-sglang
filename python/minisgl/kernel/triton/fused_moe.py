@@ -1,3 +1,5 @@
+"""Triton kernels used by the fused MoE backend."""
+
 import triton
 import triton.language as tl
 
@@ -18,6 +20,10 @@ def moe_sum_reduce_kernel(
     BLOCK_DIM: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
+    """
+    Sum each token's ``topk`` expert outputs into one hidden-state row.
+    """
+
     input_stride_0 = tl.cast(input_stride_0, dtype=tl.int64)
     input_stride_1 = tl.cast(input_stride_1, dtype=tl.int64)
     output_stride_0 = tl.cast(output_stride_0, dtype=tl.int64)
@@ -34,6 +40,8 @@ def moe_sum_reduce_kernel(
     offs_dim = dim_start + tl.arange(0, BLOCK_DIM)
 
     for token_index in range(token_start, token_end):
+        # Input is shaped like [token, topk, hidden]. This loop reduces the
+        # routed expert dimension while preserving the token and hidden axes.
         accumulator = tl.zeros((BLOCK_DIM,), dtype=tl.float32)
         input_t_ptr = input_ptr + token_index * input_stride_0 + offs_dim
         for i in tl.range(0, topk_num, num_stages=NUM_STAGE):
@@ -142,6 +150,8 @@ def fused_moe_kernel(
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak)
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
+    # Every block of sorted/padded token ids is assigned to exactly one expert,
+    # so the B pointers load from a single expert matrix for the whole block.
     b_ptrs = (
         b_ptr
         + off_experts * stride_be
@@ -181,6 +191,8 @@ def fused_moe_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
+        # The first or second GEMM can apply router weights depending on the
+        # model convention; the Python caller selects the stage with this flag.
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
 

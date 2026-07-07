@@ -1,3 +1,5 @@
+"""FastAPI frontend and interactive shell for Mini-SGLang serving."""
+
 from __future__ import annotations
 
 import asyncio
@@ -34,12 +36,20 @@ _GLOBAL_STATE = None
 
 
 def get_global_state() -> FrontendManager:
+    """
+    Return the process-global frontend manager.
+    """
+
     global _GLOBAL_STATE
     assert _GLOBAL_STATE is not None, "Global state is not initialized"
     return _GLOBAL_STATE
 
 
 def _unwrap_msg(msg: BaseFrontendMsg) -> List[UserReply]:
+    """
+    Normalize single and batched frontend replies into a list.
+    """
+
     if isinstance(msg, BatchFrontendMsg):
         result = []
         for reply in msg.data:
@@ -51,12 +61,20 @@ def _unwrap_msg(msg: BaseFrontendMsg) -> List[UserReply]:
 
 
 class GenerateRequest(BaseModel):
+    """
+    Minimal streaming generation request for the ``/generate`` endpoint.
+    """
+
     prompt: str
     max_tokens: int
     ignore_eos: bool = False
 
 
 class Message(BaseModel):
+    """
+    OpenAI-compatible chat message.
+    """
+
     role: Literal["system", "user", "assistant"]
     content: str
 
@@ -98,6 +116,10 @@ class ModelList(BaseModel):
 
 @dataclass
 class FrontendManager:
+    """
+    Async frontend state for request ids, ZMQ queues, and streaming acknowledgements.
+    """
+
     config: ServerArgs
     send_tokenizer: ZmqAsyncPushQueue[BaseTokenizerMsg]
     recv_tokenizer: ZmqAsyncPullQueue[BaseFrontendMsg]
@@ -107,6 +129,10 @@ class FrontendManager:
     event_map: Dict[int, asyncio.Event] = field(default_factory=dict)
 
     def new_user(self) -> int:
+        """
+        Allocate a frontend request id and its acknowledgement buffers.
+        """
+
         uid = self.uid_counter
         self.uid_counter += 1
         self.ack_map[uid] = []
@@ -114,6 +140,10 @@ class FrontendManager:
         return uid
 
     async def listen(self):
+        """
+        Continuously route detokenizer replies into per-request buffers.
+        """
+
         while True:
             msg = await self.recv_tokenizer.get()
             for msg in _unwrap_msg(msg):
@@ -123,15 +153,27 @@ class FrontendManager:
                 self.event_map[msg.uid].set()
 
     def _create_listener_once(self):
+        """
+        Lazily start the background detokenizer listener.
+        """
+
         if not self.initialized:
             asyncio.create_task(self.listen())
             self.initialized = True
 
     async def send_one(self, msg: BaseTokenizerMsg):
+        """
+        Send one tokenizer-bound message, starting the listener if necessary.
+        """
+
         self._create_listener_once()
         await self.send_tokenizer.put(msg)
 
     async def wait_for_ack(self, uid: int):
+        """
+        Yield detokenized chunks for one request until it finishes.
+        """
+
         event = self.event_map[uid]
 
         while True:
@@ -150,6 +192,10 @@ class FrontendManager:
         del self.event_map[uid]
 
     async def stream_generate(self, uid: int):
+        """
+        Produce Server-Sent Events for the simple ``/generate`` endpoint.
+        """
+
         async for ack in self.wait_for_ack(uid):
             yield f"data: {ack.incremental_output}\n".encode()
             if ack.finished:
@@ -158,6 +204,10 @@ class FrontendManager:
         logger.debug("Finished streaming response for user %s", uid)
 
     async def stream_chat_completions(self, uid: int):
+        """
+        Produce OpenAI-style streaming chat-completion chunks.
+        """
+
         first_chunk = True
         async for ack in self.wait_for_ack(uid):
             delta = {}
@@ -188,6 +238,10 @@ class FrontendManager:
         logger.debug("Finished streaming response for user %s", uid)
 
     async def stream_with_cancellation(self, generator, request: Request, uid: int):
+        """
+        Wrap a stream and abort backend work if the HTTP client disconnects.
+        """
+
         try:
             async for chunk in generator:
                 # detect if the client has disconnected
@@ -200,6 +254,10 @@ class FrontendManager:
             raise
 
     async def abort_user(self, uid: int):
+        """
+        Remove frontend state and ask the backend to abort a request.
+        """
+
         await asyncio.sleep(0.1)
         if uid in self.ack_map:
             del self.ack_map[uid]
@@ -209,12 +267,20 @@ class FrontendManager:
         await self.send_one(AbortMsg(uid=uid))
 
     def shutdown(self):
+        """
+        Close frontend ZMQ queues.
+        """
+
         self.send_tokenizer.stop()
         self.recv_tokenizer.stop()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    """
+    FastAPI lifespan hook that closes ZMQ resources on shutdown.
+    """
+
     yield
     # shutdown code here
     global _GLOBAL_STATE
@@ -227,6 +293,10 @@ app = FastAPI(title="MiniSGL API Server", version="0.0.1", lifespan=lifespan)
 
 @app.post("/generate")
 async def generate(req: GenerateRequest, request: Request):
+    """
+    Handle the lightweight streaming generation endpoint.
+    """
+
     logger.debug("Received generate request %s", req)
     state = get_global_state()
     uid = state.new_user()
@@ -249,11 +319,19 @@ async def generate(req: GenerateRequest, request: Request):
 
 @app.api_route("/v1", methods=["GET", "POST", "HEAD", "OPTIONS"])
 async def v1_root():
+    """
+    Return a health response for the OpenAI-compatible root path.
+    """
+
     return {"status": "ok"}
 
 
 @app.post("/v1/chat/completions")
 async def v1_completions(req: OpenAICompletionRequest, request: Request):
+    """
+    Handle OpenAI-compatible chat and text completion requests.
+    """
+
     state = get_global_state()
     if req.messages:
         prompt = [msg.model_dump() for msg in req.messages]
@@ -312,11 +390,19 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
 
 @app.get("/v1/models")
 async def available_models():
+    """
+    Return the single model currently served by this process.
+    """
+
     state = get_global_state()
     return ModelList(data=[ModelCard(id=state.config.model_path, root=state.config.model_path)])
 
 
 async def shell_completion(req: OpenAICompletionRequest):
+    """
+    Submit a shell request and return a raw text event stream.
+    """
+
     state = get_global_state()
     assert req.messages is not None, "Shell completion only supports chat-completions"
     prompt = [msg.model_dump() for msg in req.messages]
@@ -349,6 +435,10 @@ async def shell_completion(req: OpenAICompletionRequest):
 
 
 async def shell():
+    """
+    Run the interactive terminal shell against the local API frontend.
+    """
+
     commands = ["/exit", "/reset"]
     completer = WordCompleter(commands)
     session = PromptSession("$ ", completer=completer)

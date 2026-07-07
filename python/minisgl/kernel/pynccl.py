@@ -1,3 +1,5 @@
+"""Python bindings for the custom NCCL communicator FFI module."""
+
 from __future__ import annotations
 
 import functools
@@ -27,11 +29,19 @@ else:
 
 @functools.cache
 def _load_nccl_module() -> Module:
+    """
+    JIT-load the NCCL wrapper module once per process.
+    """
+
     return load_aot("pynccl", cuda_files=["pynccl.cu"], extra_ldflags=["-lnccl"])
 
 
 @functools.cache
 def _get_pynccl_wrapper_cls():
+    """
+    Register and return the Python-side TVM FFI object class.
+    """
+
     import tvm_ffi
 
     @tvm_ffi.register_object("minisgl.NCCLWrapper")
@@ -49,6 +59,19 @@ def init_pynccl(
     tp_cpu_group: torch.distributed.ProcessGroup,
     max_size_bytes: int = 0,
 ) -> PyNCCLCommunicator:
+    """
+    Bootstrap a custom NCCL communicator across tensor-parallel ranks.
+
+    Args:
+        tp_rank: Current rank.
+        tp_size: Number of ranks.
+        tp_cpu_group: CPU process group used to broadcast the NCCL unique ID.
+        max_size_bytes: Requested symmetric buffer size.
+
+    Returns:
+        FFI communicator object exposing ``all_reduce`` and ``all_gather``.
+    """
+
     import torch
 
     max_size_bytes = min(max_size_bytes, ENV.PYNCCL_MAX_BUFFER_SIZE.value)
@@ -57,6 +80,8 @@ def init_pynccl(
     cls = _get_pynccl_wrapper_cls()
 
     if tp_rank == 0:
+        # NCCL communicators require every rank to initialize with the same
+        # unique ID. Rank 0 creates it, then broadcasts over the CPU group.
         id_list = [module.create_nccl_uid()]
         torch.distributed.broadcast_object_list(
             id_list,

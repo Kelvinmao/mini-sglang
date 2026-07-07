@@ -1,3 +1,5 @@
+"""Python wrapper for C++ radix-cache prefix comparison."""
+
 from __future__ import annotations
 
 import functools
@@ -12,9 +14,16 @@ if TYPE_CHECKING:
 
 @functools.cache
 def _load_radix_module() -> Module:
+    """
+    Load the radix helper module once per process.
+    """
+
     return load_aot("radix", cpp_files=["radix.cpp"])
 
 
 def fast_compare_key(x: torch.Tensor, y: torch.Tensor) -> int:
-    # compare 2 1-D int cpu tensors for equality
+    """
+    Return the common-prefix length of two 1D CPU integer tensors.
+    """
+
     return _load_radix_module().fast_compare_key(x, y)
