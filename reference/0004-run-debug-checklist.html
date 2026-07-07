@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-SGLang Run and Debug Checklist</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Run and Debug Checklist</h1>
+        <p class="lede">
+          A compact startup checklist for Mini-SGLang.
+        </p>
+      </header>
+
+      <section>
+        <h2>Preflight</h2>
+        <pre><code>python --version
+uv --version
+nvidia-smi
+python -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.device_count())'</code></pre>
+        <p>
+          If <code>nvidia-smi</code> or <code>torch.cuda.is_available()</code>
+          fails, do not debug scheduler logic yet. Fix GPU visibility, CUDA,
+          container runtime, or Python environment first.
+        </p>
+      </section>
+
+      <section>
+        <h2>Install</h2>
+        <pre><code>uv venv --python=3.12
+source .venv/bin/activate
+uv pip install -e .</code></pre>
+        <p>
+          Mini-SGLang depends on CUDA-facing packages from
+          <a href="../pyproject.toml">pyproject.toml</a>, including PyTorch,
+          FlashInfer, SGL kernels, TVM FFI, and related runtime packages.
+        </p>
+      </section>
+
+      <section>
+        <h2>Start Server</h2>
+        <pre><code>python -m minisgl --model "Qwen/Qwen3-0.6B"</code></pre>
+        <p>
+          The default server address is <code>127.0.0.1:1919</code>. Use
+          <code>--host</code> and <code>--port</code> to change it.
+        </p>
+      </section>
+
+      <section>
+        <h2>Expected Processes</h2>
+        <ol>
+          <li>One frontend API server process.</li>
+          <li>One scheduler process per tensor-parallel rank.</li>
+          <li>One detokenizer worker.</li>
+          <li>Zero or more tokenizer workers; <code>--num-tokenizer 0</code> shares tokenizer and detokenizer.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Layer Triage</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Environment</h3>
+            <p>Missing <code>torch</code>, no CUDA device, blocked NVML, missing compiled kernel package.</p>
+          </article>
+          <article class="tile">
+            <h3>Model loading</h3>
+            <p>Bad model path, Hugging Face download failure, missing config, unsupported architecture.</p>
+          </article>
+          <article class="tile">
+            <h3>Process startup</h3>
+            <p>No "ready" acknowledgements from scheduler/tokenizer/detokenizer.</p>
+          </article>
+          <article class="tile">
+            <h3>Frontend</h3>
+            <p>Port conflict, wrong host, request schema error, client disconnect.</p>
+          </article>
+          <article class="tile">
+            <h3>Scheduler</h3>
+            <p>Requests received but no progress through prefill/decode, cache allocation failure, capacity issue.</p>
+          </article>
+          <article class="tile">
+            <h3>Engine</h3>
+            <p>CUDA OOM, attention backend failure, graph capture failure, tensor-parallel communication issue.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Useful Flags</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3><code>--dummy-weight</code></h3>
+            <p>Use generated weights for testing startup without real model weights.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--cache-type naive</code></h3>
+            <p>Disable radix prefix reuse to isolate cache-index behavior.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--cuda-graph-max-bs 0</code></h3>
+            <p>Disable CUDA graph capture when debugging graph-specific failures.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--max-prefill-length</code></h3>
+            <p>Change chunked prefill size when debugging long-prompt admission.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--page-size</code></h3>
+            <p>Change cache page granularity; test page-alignment behavior carefully.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--tp-size</code></h3>
+            <p>Set tensor-parallel rank count. Start with one GPU before debugging multi-rank issues.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

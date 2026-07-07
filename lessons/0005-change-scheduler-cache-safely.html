@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0005: Change Scheduler and Cache Code Safely</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Change Scheduler and Cache Code Safely</h1>
+        <p class="lede">
+          Goal: learn a practical edit loop for scheduler and KV-cache changes:
+          identify the invariant, test the smallest owner, then broaden validation.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          You want to modify scheduler/KV-cache logic. The risk is trying to
+          validate every idea by launching a full model server. Instead, most
+          scheduler and cache changes should start with a narrow invariant test.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../tests/core/test_cache_allocate.py">tests/core/test_cache_allocate.py</a>,
+          <a href="../python/minisgl/scheduler/decode.py">scheduler/decode.py</a>,
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>, and
+          <a href="../reference/0005-scheduler-cache-change-workflow.html">the workflow reference</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Edit Loop</h2>
+        <ol>
+          <li>Say the behavior change in one sentence.</li>
+          <li>Map it to the smallest owner file.</li>
+          <li>State the invariant that must stay true.</li>
+          <li>Write a targeted test at that owner boundary.</li>
+          <li>Make the smallest implementation change.</li>
+          <li>Run the targeted test before broad GPU/server validation.</li>
+        </ol>
+        <div class="callout">
+          <p>
+            For scheduler/cache work, a good invariant test usually beats a
+            full server run as the first feedback loop.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Pick The Owner</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Admission policy</h3>
+            <p>
+              Owner: <a href="../python/minisgl/scheduler/prefill.py">prefill.py</a>.
+              Ask: which pending request enters prefill, and how much prompt work
+              can it do now?
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Decode policy</h3>
+            <p>
+              Owner: <a href="../python/minisgl/scheduler/decode.py">decode.py</a>.
+              Ask: which running requests form the next decode batch?
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Prefill/decode priority</h3>
+            <p>
+              Owner: <a href="../python/minisgl/scheduler/scheduler.py">scheduler.py</a>.
+              Ask: does the next iteration choose prefill first, decode first,
+              or a mix?
+            </p>
+          </article>
+          <article class="tile">
+            <h3>KV page allocation</h3>
+            <p>
+              Owner: <a href="../python/minisgl/scheduler/cache.py">cache.py</a>.
+              Ask: which physical pages are allocated, freed, evicted, or written
+              into the page table?
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Radix prefix reuse</h3>
+            <p>
+              Owner: <a href="../python/minisgl/kvcache/radix_cache.py">radix_cache.py</a>.
+              Ask: what prefix matched, what was inserted, and what is evictable?
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Request invariants</h3>
+            <p>
+              Owner: <a href="../python/minisgl/core.py">core.py</a>.
+              Ask: how do <code>cached_len</code>, <code>device_len</code>, and
+              <code>remain_len</code> change?
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Example 1: Decode Policy</h2>
+        <p>
+          Suppose you want decode batches to stay deterministic. The invariant
+          is: <strong>decode batches are sorted by request id.</strong> The owner
+          is <code>DecodeManager.schedule_next_batch</code>.
+        </p>
+        <pre><code>def test_decode_batch_sorted_by_uid():
+    dm = DecodeManager(page_size=4)
+    req3 = make_req(uid=3)
+    req1 = make_req(uid=1)
+
+    dm.filter_reqs([req3, req1])
+
+    batch = dm.schedule_next_batch()
+    assert [req.uid for req in batch.reqs] == [1, 3]</code></pre>
+        <p>
+          This test does not need model weights, a tokenizer, CUDA graphs, or an
+          API server. It tests the policy owner directly.
+        </p>
+      </section>
+
+      <section>
+        <h2>Example 2: Cache Allocation</h2>
+        <p>
+          The existing
+          <a href="../tests/core/test_cache_allocate.py">test_cache_allocate.py</a>
+          is the pattern to copy. It creates a CPU <code>CacheManager</code>,
+          inserts evictable prefixes, exhausts free pages, and checks page
+          alignment after eviction.
+        </p>
+        <p>
+          The invariant is not "the server still runs." It is sharper:
+          <strong>after eviction, allocated pages and remaining free slots are
+          page-aligned and non-overlapping.</strong>
+        </p>
+        <pre><code>allocated = cm._allocate(2)
+assert len(allocated) == 2
+assert_all_page_aligned(allocated, page_size)
+assert_no_overlap(allocated, page_size)</code></pre>
+      </section>
+
+      <section>
+        <h2>Testing Ladder</h2>
+        <ol>
+          <li>Pure policy test: <code>DecodeManager</code>, <code>TableManager</code>, helper functions.</li>
+          <li>CPU cache test: <code>CacheManager</code>, radix insertion, eviction, page alignment.</li>
+          <li>Scheduler integration test: message flow, queues, prefill/decode interaction.</li>
+          <li>GPU kernel test: custom CUDA/Triton behavior.</li>
+          <li>Full server smoke test: model load, process wiring, API request, streaming response.</li>
+        </ol>
+        <p>
+          Climb only as high as the change requires. A radix tree split bug
+          should usually fail before the full server layer.
+        </p>
+      </section>
+
+      <section>
+        <h2>Current Workspace Caveat</h2>
+        <p>
+          In this workspace, the active interpreter currently lacks
+          <code>torch</code>, and GPU access is blocked by the operating system.
+          That means even CPU-ish tests that import <code>torch</code> need the
+          environment fixed first. Once the venv is installed, start with:
+        </p>
+        <pre><code>python -m pytest tests/core/test_cache_allocate.py -q</code></pre>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          You want to change which running requests are included in the next
+          decode batch. Which file owns the first test?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            <code>python/minisgl/scheduler/decode.py</code>. Start by testing
+            <code>DecodeManager.schedule_next_batch</code> directly.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          You change eviction behavior. What invariant should you check before
+          launching the full server?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            Check that evicted and reallocated pages remain page-aligned,
+            non-overlapping, and consistent with cache capacity accounting.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../tests/core/test_cache_allocate.py">test_cache_allocate.py</a>
+          and find <code>_make_cache_manager</code>. Then open
+          <a href="../python/minisgl/core.py">core.py</a> and find why that helper
+          must set a global <code>Context</code> before creating a radix cache.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            <code>RadixPrefixCache</code> reads <code>get_global_ctx().page_size</code>.
+            The test helper creates <code>Context(page_size=...)</code> and calls
+            <code>set_global_ctx</code> so radix-cache page alignment matches the
+            test case.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, work through one real miniature change as a guided exercise:
+          add or adjust a focused test around <code>DecodeManager</code> or
+          <code>CacheManager</code>, then make the code satisfy it.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

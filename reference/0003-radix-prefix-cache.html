@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Radix Prefix Cache Reference</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Radix Prefix Cache Reference</h1>
+        <p class="lede">
+          The minimum map for reading or modifying
+          <a href="../python/minisgl/kvcache/radix_cache.py">kvcache/radix_cache.py</a>.
+        </p>
+      </header>
+
+      <section>
+        <h2>Objects</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3><code>RadixTreeNode</code></h3>
+            <p>
+              One compressed edge. <code>_key</code> stores token ids, and
+              <code>_value</code> stores the matching physical KV-cache token
+              locations.
+            </p>
+          </article>
+          <article class="tile">
+            <h3><code>RadixCacheHandle</code></h3>
+            <p>
+              A stable pointer to a matched node plus <code>cached_len</code>.
+              Scheduler code locks a handle before using its physical indices.
+            </p>
+          </article>
+          <article class="tile">
+            <h3><code>RadixPrefixCache</code></h3>
+            <p>
+              The cache index. It owns the tree shape, reference counts,
+              protected/evictable accounting, prefix matching, insertion, and
+              eviction.
+            </p>
+          </article>
+          <article class="tile">
+            <h3><code>fast_compare_key</code></h3>
+            <p>
+              C++ helper exposed through
+              <a href="../python/minisgl/kernel/radix.py">kernel/radix.py</a>.
+              It finds the first different token in two CPU tensors.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Operations</h2>
+        <ol>
+          <li><code>match_prefix(input_ids)</code>: walk the tree and return the longest page-aligned cached prefix.</li>
+          <li><code>lock_handle(handle)</code>: protect the matched path so eviction cannot remove it while a request uses it.</li>
+          <li><code>insert_prefix(input_ids, indices)</code>: add newly computed page-aligned prefix tokens and their physical KV locations.</li>
+          <li><code>evict(size)</code>: remove old unprotected leaf nodes until at least <code>size</code> token slots are freed.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Invariants</h2>
+        <ol>
+          <li><code>len(node._key) == len(node._value)</code>.</li>
+          <li>Non-root nodes represent edge segments, not full prefixes.</li>
+          <li>A full matched prefix is reconstructed by walking from node to root.</li>
+          <li>Matches and inserts are aligned down to <code>page_size</code>.</li>
+          <li>Only nodes with <code>ref_count == 0</code> are evictable.</li>
+          <li>Eviction removes leaves, because removing an internal node would orphan children.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Scheduler Connection</h2>
+        <p>
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>
+          calls <code>match_prefix</code> before prefill admission and
+          <code>insert_prefix</code> after prefill/decode work makes a prefix
+          cacheable. It also calls <code>evict</code> when fresh pages are needed
+          and free pages are exhausted.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

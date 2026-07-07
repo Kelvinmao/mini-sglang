@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scheduler and KV Cache Map</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Scheduler and KV Cache Map</h1>
+        <p class="lede">
+          A quick reference for changing prefill admission, decode batching,
+          prefix reuse, or KV-page allocation.
+        </p>
+      </header>
+
+      <section>
+        <h2>Where To Edit</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>New request admission</h3>
+            <p>
+              Edit <a href="../python/minisgl/scheduler/prefill.py">scheduler/prefill.py</a>.
+              Start at <code>PrefillManager.schedule_next_batch</code> and
+              <code>PrefillAdder.try_add_one</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Decode batch policy</h3>
+            <p>
+              Edit <a href="../python/minisgl/scheduler/decode.py">scheduler/decode.py</a>.
+              Start at <code>DecodeManager.schedule_next_batch</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Prefill vs decode priority</h3>
+            <p>
+              Edit <a href="../python/minisgl/scheduler/scheduler.py">scheduler/scheduler.py</a>.
+              Start at <code>_schedule_next_batch</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Physical KV-page allocation</h3>
+            <p>
+              Edit <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>.
+              Start at <code>CacheManager.allocate_paged</code>,
+              <code>_allocate</code>, and <code>_page_to_token</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Logical prefix reuse</h3>
+            <p>
+              Edit <a href="../python/minisgl/kvcache/radix_cache.py">kvcache/radix_cache.py</a>.
+              Start at <code>match_prefix</code>, <code>insert_prefix</code>,
+              and <code>evict</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Request length invariants</h3>
+            <p>
+              Edit carefully in <a href="../python/minisgl/core.py">core.py</a>.
+              <code>Req.cached_len</code>, <code>Req.device_len</code>, and
+              <code>Req.extend_len</code> drive scheduling and allocation.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Core Invariants</h2>
+        <ol>
+          <li><code>cached_len</code> tokens already have valid KV-cache locations.</li>
+          <li><code>device_len</code> tokens are represented in scheduler device tables.</li>
+          <li><code>extend_len = device_len - cached_len</code> is the next forward region.</li>
+          <li>Fresh page allocation is only needed for pages intersecting <code>[cached_len, device_len)</code>.</li>
+          <li>The radix cache indexes logical token prefixes but stores physical KV-cache token indices.</li>
+          <li>Page starts in <code>free_slots</code> must remain aligned to <code>page_size</code>.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Tests To Read First</h2>
+        <p>
+          <a href="../tests/core/test_cache_allocate.py">tests/core/test_cache_allocate.py</a>
+          is the best existing test file for the cache allocator. It covers
+          eviction, page alignment, and page-to-token expansion when
+          <code>page_size > 1</code>.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

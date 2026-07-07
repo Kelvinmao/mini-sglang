@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0009: Should We Add More Inline Comments?</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Should We Add More Inline Comments?</h1>
+        <p class="lede">
+          Goal: decide when comments help you learn and maintain Mini-SGLang,
+          and when they make the source harder to trust.
+        </p>
+      </header>
+
+      <section>
+        <h2>Short Answer</h2>
+        <p>
+          Add more comments selectively, not everywhere. Mini-SGLang benefits
+          from comments around scheduler/cache invariants, async CUDA behavior,
+          page-table ownership, radix-cache locking, and non-obvious performance
+          tradeoffs. It does not benefit from line-by-line tutorial comments.
+        </p>
+        <p>
+          Reference:
+          <a href="../reference/0009-commenting-policy.html">the commenting policy</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Rule</h2>
+        <p>
+          A good production comment answers one of these questions:
+        </p>
+        <ol>
+          <li>Why is this code shaped this way?</li>
+          <li>What invariant must future changes preserve?</li>
+          <li>What external constraint is not visible in the local code?</li>
+        </ol>
+        <p>
+          If a comment only says what the next line does, it is usually noise.
+        </p>
+      </section>
+
+      <section>
+        <h2>Good Targets In This Repo</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Scheduler/cache boundary</h3>
+            <p>
+              Comments help around <code>cached_len</code>, <code>device_len</code>,
+              page-table writes, and free-list ownership.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Radix cache</h3>
+            <p>
+              Comments help around page-aligned matching, handle locking,
+              ref-count accounting, and LRU leaf eviction.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Overlap scheduling</h3>
+            <p>
+              Comments help explain which work happens on which stream and why
+              result processing is delayed.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Mac/MPS adaptation</h3>
+            <p>
+              Comments should identify CUDA-only assumptions before replacing
+              them with backend abstractions.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Bad Comment</h2>
+        <pre><code># Sort the requests by uid.
+return Batch(reqs=sorted(self.running_reqs, key=lambda req: req.uid), phase="decode")</code></pre>
+        <p>
+          This repeats the code.
+        </p>
+      </section>
+
+      <section>
+        <h2>Better Comment</h2>
+        <pre><code># running_reqs is a set, so sort before batching to keep scheduling deterministic.
+return Batch(reqs=sorted(self.running_reqs, key=lambda req: req.uid), phase="decode")</code></pre>
+        <p>
+          This explains the invariant: deterministic scheduling despite set
+          storage.
+        </p>
+      </section>
+
+      <section>
+        <h2>Where Long Explanations Belong</h2>
+        <p>
+          Put broad explanations in lessons, references, design docs, or tests.
+          Put short constraints in code. For example, a full explanation of
+          radix cache belongs in
+          <a href="../lessons/0003-radix-prefix-cache-internals.html">lesson 0003</a>;
+          source comments should only guard the specific invariant near the
+          code that depends on it.
+        </p>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check</h2>
+        <p>
+          Should a comment explain what <code>req.can_decode</code> returns, or
+          why finished requests must be removed before another decode batch?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            Prefer the second. The property name already says what it returns;
+            the useful comment explains the scheduling invariant.
+          </p>
+        </div>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

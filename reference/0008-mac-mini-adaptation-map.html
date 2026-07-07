@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mac Mini Adaptation Map</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Mac Mini Adaptation Map</h1>
+        <p class="lede">
+          What must change to make Mini-SGLang run on Apple Silicon.
+        </p>
+      </header>
+
+      <section>
+        <h2>Current Answer</h2>
+        <p>
+          The current Mini-SGLang server in this repo does not run as-is on a Mac
+          Mini. The repo README says Mini-SGLang supports Linux only and depends
+          on CUDA-facing kernel packages.
+        </p>
+      </section>
+
+      <section>
+        <h2>Blockers</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Engine device</h3>
+            <p>
+              <a href="../python/minisgl/engine/engine.py">engine.py</a>
+              hardcodes <code>cuda:{rank}</code>, CUDA streams, CUDA events, and
+              CUDA memory APIs.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Graph runner</h3>
+            <p>
+              <a href="../python/minisgl/engine/graph.py">engine/graph.py</a>
+              is built around CUDA graph capture and replay.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Attention backends</h3>
+            <p>
+              <a href="../python/minisgl/attention/fa.py">attention/fa.py</a>,
+              <a href="../python/minisgl/attention/fi.py">attention/fi.py</a>,
+              and <a href="../python/minisgl/attention/trtllm.py">attention/trtllm.py</a>
+              use CUDA-oriented kernels.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>KV store kernel</h3>
+            <p>
+              <a href="../python/minisgl/kvcache/mha_pool.py">kvcache/mha_pool.py</a>
+              stores K/V rows through <code>minisgl.kernel.store_cache</code>,
+              which is a CUDA JIT wrapper.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Sampling and fused ops</h3>
+            <p>
+              <a href="../python/minisgl/engine/sample.py">engine/sample.py</a>
+              and several layers call FlashInfer for sampling, activation,
+              norm, and RoPE operations.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Tensor parallelism</h3>
+            <p>
+              <a href="../python/minisgl/distributed/impl.py">distributed/impl.py</a>
+              and <a href="../python/minisgl/kernel/pynccl.py">kernel/pynccl.py</a>
+              are NCCL/PyNCCL-oriented for GPU collectives.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Pragmatic Port Target</h2>
+        <ol>
+          <li>Single process or one scheduler rank only.</li>
+          <li>No tensor parallelism.</li>
+          <li>No CUDA graph replay.</li>
+          <li>No FlashInfer, TensorRT-LLM, or SGL CUDA attention backend.</li>
+          <li>Use PyTorch <code>mps</code> when available; allow CPU fallback.</li>
+          <li>Use simple PyTorch attention first, then optimize later.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Porting Order</h2>
+        <ol>
+          <li>Add a device abstraction: <code>cuda</code>, <code>mps</code>, or <code>cpu</code>.</li>
+          <li>Add a no-graph runner for non-CUDA devices.</li>
+          <li>Add a PyTorch attention backend.</li>
+          <li>Add a PyTorch KV-cache store path.</li>
+          <li>Add PyTorch sampling fallbacks.</li>
+          <li>Disable tensor parallelism on Mac.</li>
+          <li>Make dependencies optional by platform.</li>
+          <li>Run tiny-model smoke tests.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>External Starting Points</h2>
+        <ul>
+          <li><a href="https://developer.apple.com/metal/pytorch/">Apple: Accelerated PyTorch training on Mac</a></li>
+          <li><a href="https://docs.pytorch.org/docs/2.12/notes/mps.html">PyTorch: MPS backend</a></li>
+          <li><a href="https://docs.sglang.io/docs/hardware-platforms/apple_metal">SGLang: Apple Silicon with Metal</a></li>
+          <li><a href="https://docs.flashinfer.ai/installation.html">FlashInfer installation notes</a></li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

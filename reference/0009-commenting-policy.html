@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-SGLang Commenting Policy</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Commenting Policy</h1>
+        <p class="lede">
+          Use comments to preserve design intent, not to narrate Python.
+        </p>
+      </header>
+
+      <section>
+        <h2>Add Comments For</h2>
+        <ol>
+          <li>Invariants that future edits must preserve.</li>
+          <li>Why a surprising branch, estimate, or synchronization exists.</li>
+          <li>Ownership boundaries between scheduler, engine, attention, and cache code.</li>
+          <li>Device or kernel constraints that are not obvious from types.</li>
+          <li>Performance tradeoffs where the simple implementation would be wrong.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Do Not Add Comments For</h2>
+        <ol>
+          <li>Restating a function or variable name.</li>
+          <li>Explaining normal Python syntax.</li>
+          <li>Long tutorial material inside production code.</li>
+          <li>Comments that duplicate tests or drift-prone implementation details.</li>
+          <li>Speculation that is not enforced by code or tests.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Preferred Shape</h2>
+        <pre><code># Cached prefix entries are already valid in the page table.
+# Allocate only pages intersecting [cached_len, device_len).</code></pre>
+        <p>
+          Two short lines explaining the invariant are usually better than a
+          paragraph explaining the whole serving system.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

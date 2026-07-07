@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0007: Guided CacheManager Test</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Guided CacheManager Test</h1>
+        <p class="lede">
+          Goal: test the page-allocation boundary where scheduler request state
+          becomes engine-readable page-table entries.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          This lesson adds
+          <a href="../tests/core/test_cache_manager_allocate_paged.py">tests/core/test_cache_manager_allocate_paged.py</a>.
+          The tests cover <code>CacheManager.allocate_paged</code> without a
+          running model server.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>,
+          <a href="../python/minisgl/core.py">core.py</a>, and
+          <a href="../reference/0007-cache-manager-test-pattern.html">the CacheManager test pattern</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Invariant</h2>
+        <p>
+          The scheduler should allocate fresh physical KV-cache pages only for
+          pages intersecting the uncached request region. Cached prefix entries
+          already in the page table must stay untouched.
+        </p>
+        <pre><code>first_page = ceil(cached_len / page_size)
+last_page = ceil(device_len / page_size)</code></pre>
+        <p>
+          The allocation range is <code>[first_page, last_page)</code>. For
+          <code>page_size = 4</code>, <code>cached_len = 4</code>, and
+          <code>device_len = 10</code>, the manager allocates two pages: logical
+          pages 1 and 2.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Test Setup</h2>
+        <p>
+          The test uses <code>type="naive"</code> because it is testing physical
+          page allocation, not radix prefix matching. That keeps the seam small:
+        </p>
+        <pre><code>page_table = torch.full((1, 16), -1, dtype=torch.int32)
+manager = CacheManager(
+    num_pages=8,
+    page_size=4,
+    page_table=page_table,
+    type="naive",
+)</code></pre>
+      </section>
+
+      <section>
+        <h2>Preserve Cached Prefix</h2>
+        <p>
+          The first test preloads the cached prefix area with sentinel values:
+        </p>
+        <pre><code>page_table[0, :4] = torch.tensor([100, 101, 102, 103])</code></pre>
+        <p>
+          After <code>allocate_paged</code>, those values must still be present.
+          If a future change overwrites cached prefix entries, this test catches
+          it before a full server run.
+        </p>
+      </section>
+
+      <section>
+        <h2>Write Uncached Pages</h2>
+        <p>
+          With <code>cached_len = 4</code> and <code>device_len = 10</code>,
+          the test expects token-level physical locations in positions 4 through
+          11:
+        </p>
+        <pre><code>assert page_table[0, 4:12].tolist() == list(range(8))
+assert torch.all(page_table[0, 12:] == -1)</code></pre>
+        <p>
+          This verifies both sides of the boundary: the uncached page range is
+          written, and unrelated positions remain untouched.
+        </p>
+      </section>
+
+      <section>
+        <h2>Track Free Slots</h2>
+        <p>
+          The same example consumes two pages. With eight pages total, six page
+          starts should remain:
+        </p>
+        <pre><code>assert manager.free_slots.tolist() == [8, 12, 16, 20, 24, 28]</code></pre>
+        <p>
+          This makes the allocation count explicit. It also checks page
+          alignment, which is critical when <code>page_size > 1</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>How To Run It</h2>
+        <p>
+          Once the Python environment is installed, run:
+        </p>
+        <pre><code>python -m pytest tests/core/test_cache_manager_allocate_paged.py -q</code></pre>
+        <p>
+          If dev plugins are missing, use:
+        </p>
+        <pre><code>python -m pytest -q -o addopts='' tests/core/test_cache_manager_allocate_paged.py</code></pre>
+        <!-- BOT_TODO [should][docs]: Keep transient local verification blockers in NOTES.md or label them with a date; this lesson should focus on the repeatable command and avoid becoming stale after dependencies are installed. -->
+        <p>
+          In this current workspace, verification is still blocked by missing
+          <code>pytest-cov</code> for default pytest config and missing
+          <code>torch</code> for test collection. That matches the verification
+          result recorded in <a href="../NOTES.md">NOTES.md</a>.
+        </p>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          Why does this test use <code>type="naive"</code> instead of
+          <code>type="radix"</code>?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            Because the invariant is physical page allocation, not prefix-tree
+            matching. The naive cache keeps the test focused on
+            <code>allocate_paged</code>.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          With <code>page_size = 4</code>, <code>cached_len = 4</code>, and
+          <code>device_len = 10</code>, how many pages are allocated?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            Two pages. <code>ceil(4 / 4) = 1</code> and
+            <code>ceil(10 / 4) = 3</code>, so the half-open page range has
+            <code>3 - 1 = 2</code> pages.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open
+          <a href="../tests/core/test_cache_manager_allocate_paged.py">test_cache_manager_allocate_paged.py</a>
+          and trace <code>test_allocate_paged_writes_only_uncached_pages</code>
+          into <a href="../python/minisgl/scheduler/cache.py">cache.py</a>.
+          Find where logical page numbers become token-level physical locations.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            <code>allocate_paged</code> calls <code>_allocate</code> to get page
+            starts, then <code>_page_to_token</code> expands each page start into
+            token-level locations before <code>_write_page_table</code> writes
+            them into the page table.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Planned Sequence Complete</h2>
+        <p>
+          The current learning sequence now covers request flow, prefill and
+          decode, KV allocation, radix prefix reuse, startup triage, and two
+          focused modification-test examples.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

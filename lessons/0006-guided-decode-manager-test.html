@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0006: Guided DecodeManager Test</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Guided DecodeManager Test</h1>
+        <p class="lede">
+          Goal: make one real miniature contribution: focused tests for
+          scheduler decode-policy invariants.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          This lesson turns the previous workflow into a concrete repo change:
+          <a href="../tests/core/test_decode_manager.py">tests/core/test_decode_manager.py</a>.
+          It tests <a href="../python/minisgl/scheduler/decode.py">DecodeManager</a>
+          without launching a model server.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../python/minisgl/scheduler/decode.py">scheduler/decode.py</a>,
+          <a href="../python/minisgl/core.py">core.py</a>, and
+          <a href="../reference/0006-decode-manager-test-pattern.html">the decode-manager test pattern</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Change</h2>
+        <p>
+          We added a test file for existing behavior. No production scheduler
+          code needed to change because the current implementation already
+          satisfies these invariants.
+        </p>
+        <ol>
+          <li>An empty manager is not runnable and schedules no batch.</li>
+          <li>Decode batches are sorted by request id.</li>
+          <li>Finished requests are filtered out.</li>
+          <li>Remove and abort discard running requests.</li>
+          <li><code>inflight_tokens</code> includes remaining decode tokens plus page slack.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Why This Is The Right Seam</h2>
+        <p>
+          <code>DecodeManager</code> only manages a set of scheduler-side
+          <code>Req</code> objects. It does not need model weights, tokenization,
+          attention kernels, CUDA graphs, or ZMQ. That makes it an ideal first
+          policy seam.
+        </p>
+        <div class="callout">
+          <p>
+            A small seam is valuable when it lets you test the exact invariant
+            that would otherwise be hidden inside a full server run.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>The Test Helper</h2>
+        <p>
+          The test creates real <code>Req</code> objects because
+          <code>DecodeManager</code> depends on <code>Req.can_decode</code> and
+          <code>Req.remain_len</code>. It stubs only the cache handle because
+          decode policy does not inspect cache contents.
+        </p>
+        <pre><code>class DummyCacheHandle(BaseCacheHandle):
+    def get_matched_indices(self):
+        return torch.empty(0, dtype=torch.int32)</code></pre>
+        <p>
+          That is the testing rule: use real objects for the fields whose
+          behavior matters, and stub only the dependency that is irrelevant to
+          the invariant.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Important Invariant</h2>
+        <p>
+          The most scheduler-relevant test is stable ordering:
+        </p>
+        <pre><code>manager.filter_reqs([make_req(3), make_req(1), make_req(2)])
+batch = manager.schedule_next_batch()
+assert [req.uid for req in batch.reqs] == [1, 2, 3]</code></pre>
+        <p>
+          The implementation uses a set for <code>running_reqs</code>, so sorting
+          in <code>schedule_next_batch</code> is what makes the batch order
+          deterministic.
+        </p>
+      </section>
+
+      <section>
+        <h2>Finished Requests</h2>
+        <p>
+          A request becomes unable to decode when <code>remain_len</code> reaches
+          zero. The test uses <code>Req.complete_one()</code> to simulate the
+          engine advancing a request after one forward pass.
+        </p>
+        <pre><code>finished_req = make_req(2, output_len=1)
+finished_req.complete_one()
+manager.filter_reqs([finished_req])
+assert finished_req not in manager.running_reqs</code></pre>
+      </section>
+
+      <section>
+        <h2>How To Run It</h2>
+        <p>
+          Once the Python environment is installed, run:
+        </p>
+        <pre><code>python -m pytest tests/core/test_decode_manager.py -q</code></pre>
+        <!-- BOT_TODO [should][docs]: Move this transient environment-specific failure note into NOTES.md or include an explicit dated callout; durable lessons should not imply that missing pytest-cov/torch is inherent to this repo once the learner has installed the environment. -->
+        <p>
+          In this current workspace, the repo's default pytest config first
+          fails because <code>pytest-cov</code> is not installed. With configured
+          addopts disabled, collection then fails because the active interpreter
+          still lacks <code>torch</code>. The quick local command after installing
+          runtime dependencies is:
+        </p>
+        <pre><code>python -m pytest -q -o addopts='' tests/core/test_decode_manager.py</code></pre>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          Why does the test use real <code>Req</code> objects instead of plain
+          dictionaries?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            Because <code>DecodeManager</code> relies on <code>Req.can_decode</code>
+            and <code>Req.remain_len</code>. Plain dictionaries would not test the
+            real request-length behavior.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          Why does <code>schedule_next_batch</code> sort requests even though
+          <code>running_reqs</code> is a set?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            Sets do not provide stable scheduling order. Sorting by
+            <code>uid</code> makes decode batches deterministic.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../tests/core/test_decode_manager.py">test_decode_manager.py</a>.
+          Pick one test and trace every production property or method it relies
+          on in <a href="../python/minisgl/core.py">core.py</a> and
+          <a href="../python/minisgl/scheduler/decode.py">decode.py</a>.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            For the filtering test, the path is
+            <code>Req.complete_one()</code> to update lengths,
+            <code>Req.can_decode</code> to decide whether it remains runnable,
+            and <code>DecodeManager.filter_reqs()</code> to rebuild the running set.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, do the same guided exercise for <code>CacheManager</code>: add a
+          focused test around one page-allocation or prefix-cache invariant, then
+          decide whether production code needs to change.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

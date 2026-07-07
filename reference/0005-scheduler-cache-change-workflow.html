@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scheduler and Cache Change Workflow</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Scheduler and Cache Change Workflow</h1>
+        <p class="lede">
+          A checklist for modifying scheduler or KV-cache logic without needing
+          a full GPU server run for every edit.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Loop</h2>
+        <ol>
+          <li>Name the behavior you want to change.</li>
+          <li>Find the smallest owner file.</li>
+          <li>Write the invariant in one sentence.</li>
+          <li>Pick the cheapest test seam.</li>
+          <li>Write the failing test.</li>
+          <li>Make the smallest code change.</li>
+          <li>Run the targeted test.</li>
+          <li>Only then run broader GPU/server validation.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Cheap Test Seams</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Decode policy</h3>
+            <p>
+              Test <a href="../python/minisgl/scheduler/decode.py">DecodeManager</a>
+              directly. It only needs lightweight <code>Req</code> objects.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Table slots</h3>
+            <p>
+              Test <a href="../python/minisgl/scheduler/table.py">TableManager</a>
+              with CPU tensors and simple allocate/free assertions.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Page allocation</h3>
+            <p>
+              Follow <a href="../tests/core/test_cache_allocate.py">test_cache_allocate.py</a>.
+              It creates a CPU <code>CacheManager</code> and checks page alignment.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Radix behavior</h3>
+            <p>
+              Test <code>RadixPrefixCache</code> through
+              <code>CacheManager.prefix_cache</code> with CPU token tensors.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Invariant Examples</h2>
+        <ol>
+          <li>Decode batches are emitted in stable request-id order.</li>
+          <li>Finished requests never remain in <code>running_reqs</code>.</li>
+          <li><code>free_slots</code> always contains page starts, not arbitrary token ids.</li>
+          <li>Eviction never returns overlapping page ranges.</li>
+          <li>Prefix-cache matches never reuse partial pages.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Test Command Shape</h2>
+        <pre><code>python -m pytest tests/core/test_cache_allocate.py -q</code></pre>
+        <p>
+          Run the narrowest relevant test first. Use full server validation only
+          after the local invariant passes.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

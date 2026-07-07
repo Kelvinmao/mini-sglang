@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0002: Prefill and KV Cache Allocation</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Prefill and KV Cache Allocation</h1>
+        <p class="lede">
+          Goal: predict how one tokenized prompt becomes a prefill batch with
+          table rows, cache handles, token ids, and page-table entries.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          After this lesson, you should be able to open
+          <a href="../python/minisgl/scheduler/prefill.py">prefill.py</a> and
+          <a href="../python/minisgl/scheduler/cache.py">cache.py</a> and answer:
+          "What is this request allowed to reuse, and what must be allocated
+          before the engine runs?"
+        </p>
+        <p>
+          Primary sources:
+          <a href="../python/minisgl/scheduler/prefill.py">scheduler/prefill.py</a>,
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>, and
+          <a href="../reference/0002-scheduler-kv-cache-map.html">the scheduler/KV-cache map</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>The Key Variable</h2>
+        <p>
+          The scheduler does not think only in "prompt length." It thinks in
+          three lengths on <code>Req</code>:
+        </p>
+        <div class="grid">
+          <article class="tile">
+            <h3><code>cached_len</code></h3>
+            <p>How many leading tokens already have usable KV-cache locations.</p>
+          </article>
+          <article class="tile">
+            <h3><code>device_len</code></h3>
+            <p>How many tokens are currently represented in device-side tables.</p>
+          </article>
+          <article class="tile">
+            <h3><code>extend_len</code></h3>
+            <p>The uncached region for the next model forward: <code>device_len - cached_len</code>.</p>
+          </article>
+        </div>
+        <div class="callout">
+          <p>
+            If you remember one thing: <code>cached_len</code> separates reused
+            KV-cache state from work that must be computed now.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>The Admission Walk</h2>
+        <ol>
+          <li>
+            <code>Scheduler._process_one_msg</code> receives <code>UserMsg</code>
+            and calls <code>PrefillManager.add_one_req</code>.
+          </li>
+          <li>
+            <code>PrefillManager.schedule_next_batch</code> creates a
+            <code>PrefillAdder</code> with a token budget and a reserved-size
+            estimate for decode work already in flight.
+          </li>
+          <li>
+            <code>PrefillAdder._try_allocate_one</code> calls
+            <code>CacheManager.match_req</code> to find a reusable prefix.
+          </li>
+          <li>
+            The returned cache handle gives <code>cached_len</code>. The uncached
+            prompt work is <code>input_len - cached_len</code>.
+          </li>
+          <li>
+            If capacity is available, the prefix handle is locked, a table row
+            is allocated, and matched prefix token ids plus matched physical
+            KV-cache locations are copied into that row.
+          </li>
+          <li>
+            <code>PrefillAdder._add_one_req</code> copies the next uncached
+            prompt slice into the token pool and returns either <code>Req</code>
+            or <code>ChunkedReq</code>.
+          </li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Why Chunking Exists</h2>
+        <p>
+          A long prompt may exceed the current prefill token budget. In that
+          case, <code>_add_one_req</code> returns <code>ChunkedReq</code>. A
+          chunked request is a real forward input, but it must not sample or
+          enter decode yet.
+        </p>
+        <p>
+          The next scheduler iteration continues the same pending request from
+          the chunk's <code>table_idx</code>, <code>cache_handle</code>, and
+          <code>cached_len</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Where Pages Are Allocated</h2>
+        <p>
+          Prefill admission reserves logical ownership, but
+          <code>Scheduler._prepare_batch</code> is where page-table preparation
+          happens. It calls:
+        </p>
+        <pre><code>self.cache_manager.allocate_paged(batch.reqs)</code></pre>
+        <p>
+          Inside <code>allocate_paged</code>, each request computes:
+        </p>
+        <pre><code>first_page = ceil(cached_len / page_size)
+last_page = ceil(device_len / page_size)</code></pre>
+        <p>
+          Pages in the half-open range <code>[first_page, last_page)</code>
+          intersect the uncached region. Those pages get fresh physical KV-cache
+          slots, then <code>_write_page_table</code> writes token-level physical
+          locations into the engine's page table.
+        </p>
+      </section>
+
+      <section>
+        <h2>Mental Simulation</h2>
+        <p>
+          Suppose <code>page_size = 4</code>, prompt length is 10, and the radix
+          cache matched 6 prefix tokens. At admission:
+        </p>
+        <pre><code>cached_len = 6
+device_len = 10
+extend_len = 4</code></pre>
+        <p>
+          Allocation uses <code>ceil(6 / 4) = 2</code> and
+          <code>ceil(10 / 4) = 3</code>, so it allocates one new page. That page
+          covers token positions 8..11, even though only positions 8 and 9 are
+          used immediately. Page allocation is page-granular; attention reads
+          token-level page-table entries.
+        </p>
+      </section>
+
+      <section>
+        <h2>Modification Map</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Change who gets admitted</h3>
+            <p>Edit <code>PrefillManager.schedule_next_batch</code> or <code>PrefillAdder.try_add_one</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Change capacity estimates</h3>
+            <p>Edit <code>PrefillAdder._try_allocate_one</code> and compare against <code>DecodeManager.inflight_tokens</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Change page allocation</h3>
+            <p>Edit <code>CacheManager.allocate_paged</code>, <code>_allocate</code>, or <code>_page_to_token</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Change prefix reuse</h3>
+            <p>Edit <code>RadixPrefixCache.match_prefix</code>, <code>insert_prefix</code>, or <code>evict</code>.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          A prompt has 20 tokens, and the prefix cache matched 12. What is
+          <code>extend_len</code> for the initial complete prefill request?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            <code>extend_len</code> is 8, because <code>device_len</code> starts
+            at 20 and <code>cached_len</code> is 12.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          With <code>page_size = 8</code>, <code>cached_len = 9</code>, and
+          <code>device_len = 17</code>, how many fresh pages does
+          <code>allocate_paged</code> request?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            One page. <code>ceil(9 / 8) = 2</code> and
+            <code>ceil(17 / 8) = 3</code>, and the allocation range is
+            <code>[first_page, last_page)</code>, so the count is
+            <code>3 - 2 = 1</code>.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../tests/core/test_cache_allocate.py">test_cache_allocate.py</a>.
+          Find the assertions that page starts remain aligned after eviction.
+          Then open <a href="../python/minisgl/scheduler/cache.py">cache.py</a>
+          and find the line that converts evicted token indices back into page
+          starts.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            The allocator refills <code>free_slots</code> using
+            <code>evicted[:: self.page_size]</code>. That keeps only page starts
+            from the token-level physical indices returned by prefix-cache
+            eviction.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, learn the radix cache itself: how compressed edges represent
+          token spans, why handles must be locked, how insertion splits nodes,
+          and how LRU leaf eviction returns physical KV-cache indices.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

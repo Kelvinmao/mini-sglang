@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0001: Trace One Generation Request</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Trace One Generation Request</h1>
+        <p class="lede">
+          Goal: build the first mental model you need before running Mini-SGLang
+          or changing scheduler/KV-cache code.
+        </p>
+      </header>
+
+      <section>
+        <h2>The One-Sentence Model</h2>
+        <p>
+          Mini-SGLang is a set of cooperating processes: the API server accepts
+          text, tokenizer workers turn text into token ids, scheduler workers
+          choose prefill/decode batches, the engine runs the model and samples
+          tokens, and the detokenizer streams text back.
+        </p>
+        <p>
+          Primary source:
+          <a href="../docs/structures.md">docs/structures.md</a>. Keep
+          <a href="../reference/0001-mini-sglang-serving-glossary.html">the glossary</a>
+          open while reading source.
+        </p>
+      </section>
+
+      <section>
+        <h2>The File Trail</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>1. Start processes</h3>
+            <p>
+              <a href="../python/minisgl/server/launch.py">server/launch.py</a>
+              starts one scheduler per tensor-parallel rank, tokenizer workers,
+              and one detokenizer worker.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>2. Accept HTTP</h3>
+            <p>
+              <a href="../python/minisgl/server/api_server.py">server/api_server.py</a>
+              handles <code>/generate</code> and
+              <code>/v1/chat/completions</code>, assigns a request id, and sends
+              a <code>TokenizeMsg</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>3. Tokenize</h3>
+            <p>
+              <a href="../python/minisgl/tokenizer/tokenize.py">tokenizer/tokenize.py</a>
+              converts text to token ids. The worker in
+              <a href="../python/minisgl/tokenizer/server.py">tokenizer/server.py</a>
+              wraps those ids into <code>UserMsg</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>4. Schedule</h3>
+            <p>
+              <a href="../python/minisgl/scheduler/scheduler.py">scheduler/scheduler.py</a>
+              receives <code>UserMsg</code>, asks prefill/decode managers for the
+              next batch, prepares tensors, and calls the engine.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>5. Execute</h3>
+            <p>
+              <a href="../python/minisgl/engine/engine.py">engine/engine.py</a>
+              runs model forward, samples next tokens, and returns GPU and CPU
+              token copies.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>6. Stream text</h3>
+            <p>
+              <a href="../python/minisgl/tokenizer/detokenize.py">tokenizer/detokenize.py</a>
+              turns generated token ids into incremental printable text.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>The Scheduler Core</h2>
+        <p>
+          Scheduler modification work usually starts with three questions:
+        </p>
+        <ol>
+          <li>Should this request enter prefill now?</li>
+          <li>Which decode requests should run this iteration?</li>
+          <li>Which KV-cache pages and page-table entries must exist before the engine runs?</li>
+        </ol>
+        <p>
+          In this repo, those questions map to
+          <a href="../python/minisgl/scheduler/prefill.py">prefill.py</a>,
+          <a href="../python/minisgl/scheduler/decode.py">decode.py</a>, and
+          <a href="../python/minisgl/scheduler/cache.py">cache.py</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Prefill vs Decode</h2>
+        <p>
+          <strong>Prefill</strong> processes the prompt region that is not already
+          cached. It may handle many prompt tokens for a request. <strong>Decode</strong>
+          processes one newly generated token per running request and repeats
+          until stop conditions are met.
+        </p>
+        <div class="callout">
+          <p>
+            In <code>Req</code>, <code>cached_len</code> means "tokens already
+            backed by KV cache." <code>device_len</code> means "tokens currently
+            represented in scheduler-owned device tables." The next forward
+            processes <code>device_len - cached_len</code> tokens.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Run Checklist</h2>
+        <p>
+          To run the real server, you need Linux, CUDA-capable NVIDIA hardware,
+          compatible CUDA tooling, and the package installed from this repo.
+          The repo's quick-start command is:
+        </p>
+        <pre><code>python -m minisgl --model "Qwen/Qwen3-0.6B"</code></pre>
+        <p>
+          For a first code-reading session, do not start by tuning performance.
+          Start by confirming which processes launch and which endpoint you are
+          using: <code>/generate</code> or <code>/v1/chat/completions</code>.
+        </p>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check</h2>
+        <p>
+          Without looking back, answer: a request has just been tokenized. Which
+          object carries it into the scheduler, and which manager sees it first?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            The tokenizer worker sends a <code>UserMsg</code>. The scheduler
+            receives it in <code>_process_one_msg</code> and adds it to
+            <code>PrefillManager</code> with <code>add_one_req</code>.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../python/minisgl/core.py">core.py</a> and find
+          <code>Req.extend_len</code>. Then open
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>
+          and find the loop in <code>allocate_paged</code>. Explain why
+          allocation starts from <code>cached_len</code>, not from zero.
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            Tokens before <code>cached_len</code> already have usable KV-cache
+            locations, either from a matched prefix or prior work. The scheduler
+            only needs fresh pages for the uncached region
+            <code>[cached_len, device_len)</code>.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, focus on <code>scheduler/prefill.py</code> and
+          <code>scheduler/cache.py</code>: how a prompt gets admitted, how prefix
+          cache matching changes <code>cached_len</code>, and how page-table
+          entries become attention-kernel inputs.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

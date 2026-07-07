@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0003: Radix Prefix Cache Internals</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Radix Prefix Cache Internals</h1>
+        <p class="lede">
+          Goal: understand how Mini-SGLang remembers reusable prefixes without
+          confusing logical token prefixes with physical KV-cache memory.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          After this lesson, you should be able to read
+          <a href="../python/minisgl/kvcache/radix_cache.py">radix_cache.py</a>
+          and explain what happens during <code>match_prefix</code>,
+          <code>insert_prefix</code>, <code>lock_handle</code>, and
+          <code>evict</code>.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../python/minisgl/kvcache/radix_cache.py">kvcache/radix_cache.py</a>,
+          <a href="../python/minisgl/kvcache/base.py">kvcache/base.py</a>, and
+          <a href="../reference/0003-radix-prefix-cache.html">the radix prefix cache reference</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Separate Two Things</h2>
+        <p>
+          The radix cache is not the KV tensor storage. It is an index. It maps
+          logical token prefixes to physical KV-cache token locations that were
+          already allocated by the scheduler cache manager.
+        </p>
+        <div class="grid">
+          <article class="tile">
+            <h3>Logical side</h3>
+            <p>
+              Token ids in <code>RadixTreeNode._key</code>. These describe which
+              prompt prefix is reusable.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Physical side</h3>
+            <p>
+              KV-cache token locations in <code>RadixTreeNode._value</code>.
+              These point attention kernels at existing K/V data.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Compressed Edges</h2>
+        <p>
+          A node stores one edge segment, not necessarily one token. If the tree
+          has an edge for tokens <code>[10, 11, 12, 13]</code>, the node stores
+          those four token ids and the four matching physical KV locations.
+        </p>
+        <p>
+          The full prefix for a handle is rebuilt by walking from the handle's
+          node up to the root and concatenating each node's <code>value</code>.
+          That is what <code>RadixCacheHandle.get_matched_indices</code> does.
+        </p>
+      </section>
+
+      <section>
+        <h2>How Matching Works</h2>
+        <ol>
+          <li>
+            <code>match_prefix</code> calls <code>_tree_walk(input_ids)</code>.
+          </li>
+          <li>
+            <code>_tree_walk</code> uses the first token, or first page of
+            tokens, to choose a child.
+          </li>
+          <li>
+            The child edge is compared to the remaining input with
+            <code>fast_compare_key</code>.
+          </li>
+          <li>
+            The match length is aligned down to <code>page_size</code>, because
+            KV memory is allocated and evicted by page.
+          </li>
+          <li>
+            If only part of an edge matches, <code>split_at</code> creates a new
+            parent edge for the shared prefix and leaves the old suffix beneath
+            it.
+          </li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Why Handles Must Be Locked</h2>
+        <p>
+          A matched handle points to reusable physical KV-cache locations. If
+          those locations are evicted before the scheduler copies them into a
+          live request row, the request would point at freed memory.
+        </p>
+        <p>
+          <code>lock_handle</code> increments reference counts along the matched
+          path. When a node's count moves from zero to one, its token slots move
+          from <code>evictable_size</code> to <code>protected_size</code>.
+        </p>
+        <p>
+          Unlocking reverses the accounting. When a node's count reaches zero,
+          it can be evicted again.
+        </p>
+      </section>
+
+      <section>
+        <h2>How Insertion Works</h2>
+        <p>
+          <code>insert_prefix(input_ids, indices)</code> first aligns the insert
+          length down to <code>page_size</code>. Then it walks the existing tree.
+          If the full prefix is already present, it returns a handle to the
+          existing node. If not, it appends one new node containing only the
+          missing suffix.
+        </p>
+        <pre><code>insert_len = align_down(len(input_ids), page_size)
+node, prefix_len = _tree_walk(input_ids[:insert_len])
+if prefix_len != insert_len:
+    add one new suffix node</code></pre>
+      </section>
+
+      <section>
+        <h2>How Eviction Works</h2>
+        <p>
+          Eviction only removes unprotected leaves. It collects leaf nodes with
+          <code>ref_count == 0</code>, heaps them by timestamp, and removes the
+          oldest leaves until it has freed enough token slots.
+        </p>
+        <p>
+          It returns physical token indices, not page starts. That is why
+          <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>
+          uses <code>evicted[:: self.page_size]</code> before putting evicted
+          memory back into <code>free_slots</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Mental Simulation</h2>
+        <p>
+          Assume <code>page_size = 2</code>. The cache contains a prefix edge for
+          tokens <code>[1, 2, 3, 4]</code>. A new prompt starts with
+          <code>[1, 2, 9, 9]</code>.
+        </p>
+        <p>
+          The raw common prefix is two tokens. Since two is already page-aligned,
+          <code>_tree_walk</code> splits the old edge at position two. The tree
+          now has shared edge <code>[1, 2]</code>, and the old suffix
+          <code>[3, 4]</code> hangs under it.
+        </p>
+        <p>
+          The new request can reuse exactly two tokens of KV cache. Its
+          <code>cached_len</code> is two.
+        </p>
+      </section>
+
+      <section>
+        <h2>Change Map</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Match policy</h3>
+            <p>Start at <code>_tree_walk</code> and <code>match_prefix</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Insert policy</h3>
+            <p>Start at <code>insert_prefix</code> and <code>split_at</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Eviction policy</h3>
+            <p>Start at <code>evict</code> and <code>_collect_leave_nodes_for_evict</code>.</p>
+          </article>
+          <article class="tile">
+            <h3>Safety accounting</h3>
+            <p>Start at <code>lock_handle</code> and <code>size_info</code>.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          In this repo, does the radix cache own the K/V tensors themselves, or
+          does it index physical locations owned elsewhere?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            It indexes physical locations owned elsewhere. The engine owns the
+            KV tensors, while the scheduler cache manager and radix cache track
+            which physical slots can be reused.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          Why does <code>_tree_walk</code> align the match length down to
+          <code>page_size</code>?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            Because KV-cache allocation and eviction are page-granular. Reusing
+            a partial page would break the scheduler's page-table and free-list
+            assumptions.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../python/minisgl/kvcache/radix_cache.py">radix_cache.py</a>.
+          Find the line in <code>evict</code> that rejects protected nodes, then
+          find the line in <code>lock_handle</code> that moves a node from
+          evictable to protected.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            <code>evict</code> asserts <code>node.ref_count == 0</code> before
+            removing a leaf. <code>lock_handle</code> moves accounting when a
+            node's <code>ref_count</code> is zero before incrementing it.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, connect this to running and debugging: start with a minimal run
+          command, identify expected processes, and learn what logs or failures
+          tell you which layer is broken.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

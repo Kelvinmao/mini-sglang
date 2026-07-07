@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DecodeManager Test Pattern</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>DecodeManager Test Pattern</h1>
+        <p class="lede">
+          A reusable pattern for scheduler policy tests that do not need a model
+          server.
+        </p>
+      </header>
+
+      <section>
+        <h2>What To Test</h2>
+        <ol>
+          <li>Empty manager behavior.</li>
+          <li>Stable batch ordering.</li>
+          <li>Filtering of requests that cannot decode.</li>
+          <li>Abort and remove semantics.</li>
+          <li>Capacity estimates such as <code>inflight_tokens</code>.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Helper Shape</h2>
+        <pre><code>class DummyCacheHandle(BaseCacheHandle):
+    def get_matched_indices(self):
+        return torch.empty(0, dtype=torch.int32)
+
+def make_req(uid, output_len=1, prompt_len=1):
+    return Req(
+        input_ids=torch.arange(prompt_len, dtype=torch.int32),
+        table_idx=uid,
+        cached_len=0,
+        output_len=output_len,
+        uid=uid,
+        sampling_params=SamplingParams(max_tokens=output_len),
+        cache_handle=DummyCacheHandle(cached_len=0),
+    )</code></pre>
+        <p>
+          The helper builds real <code>Req</code> objects while replacing the
+          cache handle with a harmless stub because <code>DecodeManager</code>
+          does not inspect cache contents.
+        </p>
+      </section>
+
+      <section>
+        <h2>Command</h2>
+        <pre><code>python -m pytest tests/core/test_decode_manager.py -q</code></pre>
+        <p>
+          If the active environment does not have the repo's dev test plugins,
+          bypass configured addopts while doing a quick local check:
+        </p>
+        <pre><code>python -m pytest -q -o addopts='' tests/core/test_decode_manager.py</code></pre>
+      </section>
+    </main>
+  </body>
+</html>

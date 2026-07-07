@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0004: Run and Debug Startup</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Run and Debug Startup</h1>
+        <p class="lede">
+          Goal: learn the startup path well enough to diagnose whether a failure
+          belongs to the environment, model loading, process wiring, scheduler,
+          engine, or frontend.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          Before changing scheduler or KV-cache logic, you need a reliable way
+          to start the system and classify failures. This lesson gives you that
+          runbook.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../README.md">README.md</a>,
+          <a href="../python/minisgl/server/args.py">server/args.py</a>,
+          <a href="../python/minisgl/server/launch.py">server/launch.py</a>, and
+          <a href="../reference/0004-run-debug-checklist.html">the run/debug checklist</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>First Principle</h2>
+        <p>
+          Mini-SGLang is not a single Python function call. Startup has layers:
+          Python environment, CUDA visibility, dependency import, model config,
+          model weights, process launch, ZMQ wiring, scheduler initialization,
+          engine initialization, and frontend serving.
+        </p>
+        <div class="callout">
+          <p>
+            If an earlier layer is broken, later layers may look suspicious but
+            are not the right place to debug yet.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Preflight Commands</h2>
+        <p>
+          Run these before launching the server:
+        </p>
+        <pre><code>python --version
+uv --version
+nvidia-smi
+python -c 'import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.device_count())'</code></pre>
+        <p>
+          On this workspace at lesson creation time, Python and <code>uv</code>
+          were present, but the active interpreter did not have <code>torch</code>
+          installed and <code>nvidia-smi</code> reported OS-blocked GPU access.
+          That means a real server launch would currently fail before scheduler
+          logic becomes relevant.
+        </p>
+      </section>
+
+      <section>
+        <h2>Install Path</h2>
+        <p>
+          The repo's normal editable install path is:
+        </p>
+        <pre><code>uv venv --python=3.12
+source .venv/bin/activate
+uv pip install -e .</code></pre>
+        <p>
+          Read <a href="../pyproject.toml">pyproject.toml</a> when install
+          fails. This project depends on CUDA-facing packages such as PyTorch,
+          FlashInfer, SGL kernels, TVM FFI, and related runtime packages.
+        </p>
+      </section>
+
+      <section>
+        <h2>Minimal Launch</h2>
+        <p>
+          The main entrypoint is <a href="../python/minisgl/__main__.py">__main__.py</a>,
+          which calls <code>launch_server()</code>. The basic launch command is:
+        </p>
+        <pre><code>python -m minisgl --model "Qwen/Qwen3-0.6B"</code></pre>
+        <p>
+          <a href="../python/minisgl/server/args.py">server/args.py</a> parses
+          <code>--model</code>, <code>--tp-size</code>, <code>--cache-type</code>,
+          <code>--page-size</code>, <code>--attn</code>, <code>--host</code>, and
+          <code>--port</code>. Defaults include host <code>127.0.0.1</code>,
+          port <code>1919</code>, tensor parallel size <code>1</code>, and cache
+          type <code>radix</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>What Should Start</h2>
+        <p>
+          <a href="../python/minisgl/server/launch.py">server/launch.py</a> starts
+          backend processes before the API server declares itself ready.
+        </p>
+        <ol>
+          <li>One scheduler process for each tensor-parallel rank.</li>
+          <li>One detokenizer worker.</li>
+          <li><code>--num-tokenizer</code> tokenizer workers, or a shared tokenizer/detokenizer worker when the count is zero.</li>
+          <li>The frontend FastAPI/Uvicorn server.</li>
+        </ol>
+        <p>
+          The launcher waits for acknowledgements from the primary scheduler,
+          tokenizers, and detokenizer. If you do not see readiness logs, classify
+          the failure before sending HTTP requests.
+        </p>
+      </section>
+
+      <section>
+        <h2>Classify Failures By Layer</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Import failure</h3>
+            <p>
+              Missing package or incompatible install. Check active venv,
+              <code>pyproject.toml</code>, and whether CUDA packages installed.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>CUDA failure</h3>
+            <p>
+              <code>nvidia-smi</code> fails, CUDA unavailable in PyTorch, or
+              kernels cannot initialize. Fix runtime visibility before scheduler work.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Model failure</h3>
+            <p>
+              Bad model path, download problem, unsupported config, dtype issue,
+              or weight-loading failure. Check <code>utils/hf.py</code> and
+              <code>engine/config.py</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Process failure</h3>
+            <p>
+              Missing readiness acknowledgement from scheduler/tokenizer/detokenizer.
+              Check <code>server/launch.py</code> and process-specific logs.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Scheduler failure</h3>
+            <p>
+              Requests arrive but do not make progress through prefill/decode.
+              Check <code>scheduler/scheduler.py</code>, <code>prefill.py</code>,
+              <code>decode.py</code>, and <code>cache.py</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Frontend failure</h3>
+            <p>
+              Server is up but requests fail. Check route shape in
+              <code>server/api_server.py</code>, port, host, streaming, and abort handling.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Useful Debug Knobs</h2>
+        <p>
+          These come from <a href="../python/minisgl/server/args.py">server/args.py</a>
+          and <a href="../python/minisgl/env.py">env.py</a>.
+        </p>
+        <div class="grid">
+          <article class="tile">
+            <h3><code>--dummy-weight</code></h3>
+            <p>Skip real model weights, useful for startup-path testing.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--cache-type naive</code></h3>
+            <p>Disable radix prefix reuse to isolate radix-cache behavior.</p>
+          </article>
+          <article class="tile">
+            <h3><code>--cuda-graph-max-bs 0</code></h3>
+            <p>Disable CUDA graph capture while debugging execution issues.</p>
+          </article>
+          <article class="tile">
+            <h3><code>MINISGL_DISABLE_OVERLAP_SCHEDULING=1</code></h3>
+            <p>Use the non-overlapped scheduler loop for simpler control flow.</p>
+          </article>
+          <article class="tile">
+            <h3><code>LOG_LEVEL=DEBUG</code></h3>
+            <p>Increase log detail through the shared logger.</p>
+          </article>
+          <article class="tile">
+            <h3><code>LOG_PID=1</code></h3>
+            <p>Add process ids to logs when many workers are active.</p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Request Smoke Test</h2>
+        <p>
+          Once the server is ready, test the simple endpoint first:
+        </p>
+        <pre><code>curl -N http://127.0.0.1:1919/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Say hello in one sentence.","max_tokens":16}'</code></pre>
+        <p>
+          If this works, then test the OpenAI-compatible route:
+        </p>
+        <pre><code>curl -N http://127.0.0.1:1919/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Say hello."}],"max_tokens":16,"stream":true}'</code></pre>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          If <code>python -c 'import torch'</code> fails, should you inspect
+          <code>PrefillManager</code> first?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            No. That is an environment/import failure. Fix the active Python
+            environment before debugging scheduler behavior.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          Which file tells you how many scheduler, tokenizer, and detokenizer
+          processes should launch?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            <code>python/minisgl/server/launch.py</code>. It starts one scheduler
+            per TP rank, one detokenizer, and the configured tokenizer workers.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Source Exercise</h2>
+        <p>
+          Open <a href="../python/minisgl/scheduler/scheduler.py">scheduler.py</a>.
+          Find the branch that chooses between <code>normal_loop</code> and
+          <code>overlap_loop</code>. Then open
+          <a href="../python/minisgl/env.py">env.py</a> and find the environment
+          variable that controls it.
+        </p>
+        <button class="button" data-reveal-target="answer-3">Show answer</button>
+        <div class="answer" id="answer-3">
+          <p>
+            <code>Scheduler.run_forever</code> checks
+            <code>ENV.DISABLE_OVERLAP_SCHEDULING</code>. The environment variable
+            name is <code>MINISGL_DISABLE_OVERLAP_SCHEDULING</code>.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Lesson</h2>
+        <p>
+          Next, learn a focused modification workflow: make one small scheduler
+          or cache change, write a targeted test around the invariant, and avoid
+          needing a full GPU server run for every edit.
+        </p>
+        <p>
+          Ask the agent follow-up questions when a file, variable, or control
+          path feels unclear.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

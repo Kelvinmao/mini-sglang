@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0008: Can Mini-SGLang Run on Mac Mini?</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Can Mini-SGLang Run on Mac Mini?</h1>
+        <p class="lede">
+          Goal: understand why the current repo is not Mac-ready, and what a
+          realistic Apple Silicon adaptation would look like.
+        </p>
+      </header>
+
+      <section>
+        <h2>Short Answer</h2>
+        <p>
+          No, not as the current server. This repo is written around Linux,
+          NVIDIA CUDA, CUDA graph replay, FlashInfer/SGL kernels, and NCCL-style
+          GPU communication.
+        </p>
+        <p>
+          A Mac Mini adaptation is possible as an educational single-device
+          backend, but it would be a port. It should first preserve the
+          scheduler/KV-cache ideas and give up the CUDA-specific performance
+          features.
+        </p>
+      </section>
+
+      <section>
+        <h2>Why A Simple Install Will Fail</h2>
+        <ol>
+          <li>
+            The README says Mini-SGLang is Linux-only and depends on
+            CUDA-specific packages.
+          </li>
+          <li>
+            <a href="../python/minisgl/engine/engine.py">engine.py</a> hardcodes
+            <code>torch.device("cuda:{rank}")</code>, CUDA streams, CUDA events,
+            and CUDA memory checks.
+          </li>
+          <li>
+            Attention, sampling, activation, norm, RoPE, KV-store, and tensor
+            parallel communication paths call CUDA-oriented packages or custom
+            CUDA/Triton kernels.
+          </li>
+          <li>
+            The Dockerfile is based on NVIDIA CUDA images, which do not make
+            Apple Silicon GPUs available as CUDA devices.
+          </li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>The Key Distinction</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Run current Mini-SGLang</h3>
+            <p>
+              Needs a Linux + NVIDIA CUDA environment. Use a remote GPU box, a
+              Linux desktop/server, or cloud GPU.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Run the ideas on Mac</h3>
+            <p>
+              Keep tokenizer, API shape, scheduler, request lifecycle, and
+              KV-cache data model. Replace CUDA execution with a simple PyTorch
+              CPU/MPS backend.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Recommended Mac Port Scope</h2>
+        <p>
+          Do not try to port the whole performance stack first. Start with a
+          deliberately slower backend:
+        </p>
+        <ol>
+          <li>Single Mac device only: <code>--tp-size 1</code>.</li>
+          <li>No CUDA graph capture.</li>
+          <li>No FlashInfer, TensorRT-LLM, or SGL CUDA attention backend.</li>
+          <li>No PyNCCL/NCCL.</li>
+          <li>Use <code>torch.device("mps")</code> if available, otherwise CPU.</li>
+          <li>Use PyTorch attention and PyTorch tensor indexing for KV-cache storage.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Porting Plan</h2>
+        <ol>
+          <li>
+            Add a device selector in engine config: <code>auto</code>,
+            <code>cuda</code>, <code>mps</code>, <code>cpu</code>.
+          </li>
+          <li>
+            Split CUDA stream/event/memory behavior behind a runtime abstraction.
+            On MPS/CPU, use synchronous behavior first.
+          </li>
+          <li>
+            Add a <code>torch</code> attention backend that uses ordinary PyTorch
+            matmul/softmax or scaled-dot-product attention.
+          </li>
+          <li>
+            Add a PyTorch KV-cache store implementation to replace
+            <code>store_cache</code> on non-CUDA devices.
+          </li>
+          <li>
+            Replace FlashInfer sampling with PyTorch <code>softmax</code>,
+            <code>topk</code>, <code>multinomial</code>, and <code>argmax</code>
+            fallbacks.
+          </li>
+          <li>
+            Replace FlashInfer activation/norm/RoPE calls with PyTorch
+            implementations or already-existing model-layer logic.
+          </li>
+          <li>
+            Make CUDA dependencies optional so macOS can install the educational
+            backend without FlashInfer/sgl-kernel.
+          </li>
+          <li>
+            Run only small models and short contexts first.
+          </li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>What You Should Not Port First</h2>
+        <p>
+          Do not begin with tensor parallelism, CUDA graph equivalents, fused
+          Metal kernels, or performance parity. Those are second-stage projects.
+          The first win is getting one request through the lifecycle on a Mac,
+          even if it is slow.
+        </p>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 1</h2>
+        <p>
+          If you adapt Mini-SGLang for a Mac Mini, what should you preserve
+          first: scheduler/KV-cache semantics or CUDA graph performance?
+        </p>
+        <button class="button" data-reveal-target="answer-1">Show answer</button>
+        <div class="answer" id="answer-1">
+          <p>
+            Preserve scheduler/KV-cache semantics first. CUDA graph performance
+            is a CUDA-specific optimization and should be removed from the first
+            Mac backend.
+          </p>
+        </div>
+      </section>
+
+      <section class="practice">
+        <h2>Retrieval Check 2</h2>
+        <p>
+          Which file is the biggest early blocker because it hardcodes CUDA
+          device, stream, event, and memory behavior?
+        </p>
+        <button class="button" data-reveal-target="answer-2">Show answer</button>
+        <div class="answer" id="answer-2">
+          <p>
+            <code>python/minisgl/engine/engine.py</code>. It assumes CUDA during
+            engine initialization and forward result handling.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Next Practical Step</h2>
+        <p>
+          The clean next project is a design spike: add a minimal
+          <code>--device cpu|mps|cuda</code> flag and make enough non-CUDA
+          fallbacks compile for unit tests, without trying to serve a full model
+          yet.
+        </p>
+      </section>
+    </main>
+    <script src="../assets/teach/reveal.js"></script>
+  </body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CacheManager Test Pattern</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>CacheManager Test Pattern</h1>
+        <p class="lede">
+          A reusable pattern for testing scheduler-owned KV-page allocation.
+        </p>
+      </header>
+
+      <section>
+        <h2>What To Test</h2>
+        <ol>
+          <li>Cached prefix page-table entries are preserved.</li>
+          <li>Fresh physical pages are written only for the uncached page range.</li>
+          <li><code>free_slots</code> shrinks by the expected page count.</li>
+          <li>Remaining free slots stay page-aligned.</li>
+          <li>Multiple request rows receive non-overlapping physical locations.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Helper Shape</h2>
+        <pre><code>manager = CacheManager(
+    num_pages=8,
+    page_size=4,
+    page_table=page_table,
+    type="naive",
+)</code></pre>
+        <p>
+          Use <code>type="naive"</code> when testing physical allocation only.
+          That avoids radix-cache setup and keeps the test focused on
+          <code>allocate_paged</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Core Formula</h2>
+        <pre><code>first_page = ceil(cached_len / page_size)
+last_page = ceil(device_len / page_size)
+needed_pages = last_page - first_page</code></pre>
+        <p>
+          <code>allocate_paged</code> writes token-level physical locations for
+          pages in the half-open range <code>[first_page, last_page)</code>.
+        </p>
+      </section>
+
+      <section>
+        <h2>Command</h2>
+        <pre><code>python -m pytest tests/core/test_cache_manager_allocate_paged.py -q</code></pre>
+        <p>
+          If dev plugins are missing, do a quick local check with:
+        </p>
+        <pre><code>python -m pytest -q -o addopts='' tests/core/test_cache_manager_allocate_paged.py</code></pre>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-SGLang Serving Glossary</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Mini-SGLang Serving Glossary</h1>
+        <p class="lede">
+          A compact reference for the words that matter when tracing and changing
+          scheduler or KV-cache behavior.
+        </p>
+      </header>
+
+      <section class="grid">
+        <article class="tile">
+          <h2>Request</h2>
+          <p>
+            One user generation job. In code, scheduler-side request state is
+            <code>Req</code> in <a href="../python/minisgl/core.py">core.py</a>.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Prefill</h2>
+          <p>
+            The phase that processes prompt tokens and writes their K/V tensors
+            into cache. In this repo, prefill admission and chunking live in
+            <a href="../python/minisgl/scheduler/prefill.py">scheduler/prefill.py</a>.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Decode</h2>
+          <p>
+            The repeated phase that generates one new token per running request
+            per forward pass. The decode set lives in
+            <a href="../python/minisgl/scheduler/decode.py">scheduler/decode.py</a>.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Batch</h2>
+          <p>
+            A scheduled group of requests for one model forward. In code,
+            <code>Batch.phase</code> is either <code>prefill</code> or
+            <code>decode</code>.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>KV Cache</h2>
+          <p>
+            GPU memory holding key/value tensors from earlier tokens so later
+            attention does not recompute them. Physical storage is owned by the
+            engine; allocation and reuse are coordinated by the scheduler cache
+            manager.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Page Table</h2>
+          <p>
+            A GPU table mapping request token positions to physical KV-cache
+            token slots. The engine creates it, and
+            <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>
+            writes into it.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Prefix Cache</h2>
+          <p>
+            A logical index over cached token prefixes. With radix cache enabled,
+            matching prompts can reuse already-computed KV slots.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Radix Cache</h2>
+          <p>
+            A compressed prefix tree for sharing KV-cache pages across requests.
+            Its implementation is
+            <a href="../python/minisgl/kvcache/radix_cache.py">kvcache/radix_cache.py</a>.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Scheduler</h2>
+          <p>
+            The process that decides what work runs next. It receives tokenized
+            requests, chooses prefill or decode batches, prepares page tables,
+            calls the engine, and streams sampled tokens onward.
+          </p>
+        </article>
+
+        <article class="tile">
+          <h2>Engine</h2>
+          <p>
+            The per-GPU executor. It owns model weights, attention backend, KV
+            tensors, sampling, CUDA stream, and optional CUDA graph replay.
+          </p>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>
