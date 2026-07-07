@@ -116,15 +116,14 @@ assert finished_req not in manager.running_reqs</code></pre>
           Once the Python environment is installed, run:
         </p>
         <pre><code>python -m pytest tests/core/test_decode_manager.py -q</code></pre>
-        <!-- BOT_TODO [should][docs]: Move this transient environment-specific failure note into NOTES.md or include an explicit dated callout; durable lessons should not imply that missing pytest-cov/torch is inherent to this repo once the learner has installed the environment. -->
         <p>
-          In this current workspace, the repo's default pytest config first
-          fails because <code>pytest-cov</code> is not installed. With configured
-          addopts disabled, collection then fails because the active interpreter
-          still lacks <code>torch</code>. The quick local command after installing
-          runtime dependencies is:
+          If the local pytest plugins are not installed yet, disable configured
+          addopts while you bring up the runtime environment:
         </p>
         <pre><code>python -m pytest -q -o addopts='' tests/core/test_decode_manager.py</code></pre>
+        <p>
+          For dated local verification blockers, see <a href="../NOTES.md">NOTES.md</a>.
+        </p>
       </section>
 
       <section class="practice">

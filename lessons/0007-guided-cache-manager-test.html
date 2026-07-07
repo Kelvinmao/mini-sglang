@@ -115,12 +115,8 @@ assert torch.all(page_table[0, 12:] == -1)</code></pre>
           If dev plugins are missing, use:
         </p>
         <pre><code>python -m pytest -q -o addopts='' tests/core/test_cache_manager_allocate_paged.py</code></pre>
-        <!-- BOT_TODO [should][docs]: Keep transient local verification blockers in NOTES.md or label them with a date; this lesson should focus on the repeatable command and avoid becoming stale after dependencies are installed. -->
         <p>
-          In this current workspace, verification is still blocked by missing
-          <code>pytest-cov</code> for default pytest config and missing
-          <code>torch</code> for test collection. That matches the verification
-          result recorded in <a href="../NOTES.md">NOTES.md</a>.
+          For dated local verification blockers, see <a href="../NOTES.md">NOTES.md</a>.
         </p>
       </section>
 
