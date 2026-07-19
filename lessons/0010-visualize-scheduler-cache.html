@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0010: Visualize the Scheduler and KV-Cache</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Visualize the Scheduler and KV-Cache</h1>
+        <p class="lede">
+          Goal: watch the batch, the radix prefix tree, and page memory change
+          step by step, so prefill, decode, prefix reuse, and eviction stop
+          being abstract.
+        </p>
+      </header>
+
+      <section>
+        <h2>The Win</h2>
+        <p>
+          The scheduler and radix cache are the hardest parts to picture from
+          source alone. This tool records what actually happened during a run
+          and lets you scrub through it, one scheduler iteration at a time.
+        </p>
+        <p>
+          Primary sources:
+          <a href="../python/minisgl/trace/tracer.py">trace/tracer.py</a>,
+          <a href="../benchmark/offline/trace_radix_demo.py">benchmark/offline/trace_radix_demo.py</a>,
+          <a href="../visualizer/index.html">visualizer/index.html</a>, and
+          <a href="../reference/0010-scheduler-cache-visualizer.html">the visualizer map</a>.
+        </p>
+      </section>
+
+      <section>
+        <h2>First Principle</h2>
+        <p>
+          Recording is decoupled from viewing. The engine only appends a cheap
+          snapshot per step; the browser does all the drawing. When tracing is
+          off, every hook is a single boolean check, so the hot loop is
+          unaffected.
+        </p>
+        <div class="callout">
+          <p>
+            Tracing runs with overlap scheduling disabled so each recorded step
+            is exactly one schedule &rarr; forward &rarr; commit unit.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Generate a Trace</h2>
+        <pre><code>python benchmark/offline/trace_radix_demo.py</code></pre>
+        <p>
+          This writes <code>visualizer/sample-trace.json</code>. The scenario is
+          built from explicit token ids: two prompts share a long prefix (reuse),
+          several long distinct prompts create pressure (chunked prefill), and a
+          small page budget forces eviction.
+        </p>
+        <div class="callout">
+          <p>
+            No working GPU (e.g. Turing / RTX 20-series, where the attention
+            kernels will not run)? Use the pure-Python generator instead — it
+            reimplements the radix-cache algorithm and needs no GPU, no CUDA, and
+            no PyTorch:
+          </p>
+          <pre><code>python visualizer/gen_trace.py</code></pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Open the Viewer</h2>
+        <pre><code>cd visualizer &amp;&amp; python -m http.server 8123
+# then open http://localhost:8123/ in a browser</code></pre>
+        <p>
+          Serving over HTTP lets the page load the checked-in sample
+          automatically. You can also open <code>index.html</code> directly and
+          drag any <code>trace.json</code> onto the page.
+        </p>
+      </section>
+
+      <section>
+        <h2>What Each Panel Shows</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Radix tree</h3>
+            <p>
+              Each node is one compressed edge; the number is its token-span
+              length. Blue = protected by a live request, amber = evictable. A
+              gold ring marks the node a request just matched.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Batch composition</h3>
+            <p>
+              One row per request in the step, tagged prefill/decode/chunked.
+              The blue portion is the cached prefix; the green portion is the
+              tokens this step computed.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Memory &amp; pages</h3>
+            <p>
+              The stacked bar splits capacity into protected, evictable, in-use,
+              and free. The sparkline tracks free pages across the whole run.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Scrubber</h3>
+            <p>
+              Play, step, or drag; arrow keys step, space toggles play. The
+              caption summarizes what changed.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>Exercise</h2>
+        <ol>
+          <li>Find the step where the second prompt reuses the shared prefix. How many tokens did it skip computing?</li>
+          <li>Find the first eviction. Which node disappeared, and what freed it?</li>
+          <li>
+            Re-run with <code>--num-pages</code> larger. Does eviction still
+            happen? Confirm your prediction against the source in
+            <code>kvcache/radix_cache.py</code>.
+          </li>
+        </ol>
+      </section>
+    </main>
+  </body>
+</html>

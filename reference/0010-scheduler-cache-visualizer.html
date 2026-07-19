@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scheduler &amp; KV-Cache Visualizer Map</title>
+    <link rel="stylesheet" href="../assets/teach/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Scheduler &amp; KV-Cache Visualizer Map</h1>
+        <p class="lede">
+          How the trace is produced, what one step contains, and where to look
+          when the animation and the code disagree.
+        </p>
+      </header>
+
+      <section>
+        <h2>Pipeline</h2>
+        <ol>
+          <li>
+            An env-gated tracer records one snapshot per scheduler iteration to a
+            JSON file:
+            <a href="../python/minisgl/trace/tracer.py">trace/tracer.py</a>.
+          </li>
+          <li>
+            A curated offline driver produces a legible trace:
+            <a href="../benchmark/offline/trace_radix_demo.py">benchmark/offline/trace_radix_demo.py</a>.
+          </li>
+          <li>
+            A self-contained HTML viewer replays it:
+            <a href="../visualizer/index.html">visualizer/index.html</a>.
+          </li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>Hook Points</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3>Batch composition</h3>
+            <p>
+              Snapshotted before the forward pass in
+              <code>scheduler/scheduler.py</code> (<code>normal_loop</code>).
+            </p>
+          </article>
+          <article class="tile">
+            <h3>match / insert / evict</h3>
+            <p>
+              Emitted from
+              <a href="../python/minisgl/kvcache/radix_cache.py">kvcache/radix_cache.py</a>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>alloc</h3>
+            <p>
+              Emitted from <code>allocate_paged</code> in
+              <a href="../python/minisgl/scheduler/cache.py">scheduler/cache.py</a>.
+            </p>
+          </article>
+          <article class="tile">
+            <h3>Tree snapshot</h3>
+            <p>
+              <code>dump_tree</code> on the radix cache serializes node
+              uuid/length/ref_count/protected.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section>
+        <h2>One Step (hybrid record)</h2>
+        <pre><code>{
+  "index", "phase", "description",
+  "batch":  [{ uid, phase, cached_len, device_len, extend_len }],
+  "tree":   [{ uuid, parent, length, ref_count, protected, tokens }],
+  "evictable_size", "protected_size", "used_pages", "free_pages",
+  "num_pages", "page_size",
+  "events": [{ kind: match|insert|evict|alloc, ... }]
+}</code></pre>
+        <p>
+          The snapshot is authoritative state; the events are what changed. The
+          viewer draws the snapshot and highlights the events.
+        </p>
+      </section>
+
+      <section>
+        <h2>Required Knobs</h2>
+        <div class="grid">
+          <article class="tile">
+            <h3><code>MINISGL_TRACE_SCHEDULER_PATH</code></h3>
+            <p>Non-empty output path enables tracing; empty disables it (no overhead).</p>
+          </article>
+          <article class="tile">
+            <h3><code>MINISGL_DISABLE_OVERLAP_SCHEDULING=1</code></h3>
+            <p>
+              Required. Tracing hooks live in <code>normal_loop</code>, so each
+              step is one clean schedule &rarr; forward &rarr; commit unit.
+            </p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
