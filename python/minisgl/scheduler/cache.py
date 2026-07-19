@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 from minisgl.core import Req
 from minisgl.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
+from minisgl.trace import get_tracer
 from minisgl.utils import div_ceil
 
 if TYPE_CHECKING:
@@ -112,6 +113,7 @@ class CacheManager:
         if needed_pages > 0:
             allocated = self._page_to_token(self._allocate(needed_pages))
             _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
+            get_tracer().emit_alloc(pages=needed_pages)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
         """

@@ -21,6 +21,7 @@ from minisgl.message import (
     ExitMsg,
     UserMsg,
 )
+from minisgl.trace import get_tracer
 from minisgl.utils import init_logger, load_tokenizer
 
 from .cache import CacheManager
@@ -98,6 +99,15 @@ class Scheduler(SchedulerIOMixin):
         # Initialize the I/O mixin
         super().__init__(config, self.engine.tp_cpu_group)
 
+        # Record run-level metadata for the visualizer trace (no-op when disabled).
+        get_tracer().set_meta(
+            model=config.model_path,
+            page_size=config.page_size,
+            num_pages=self.engine.num_pages,
+            cache_type=config.cache_type,
+            overlap_disabled=bool(ENV.DISABLE_OVERLAP_SCHEDULING),
+        )
+
     def run_when_idle(self) -> None:
         """
         Run lightweight maintenance before blocking for new work.
@@ -147,11 +157,21 @@ class Scheduler(SchedulerIOMixin):
             self._process_one_msg(msg)
 
         forward_input = self._schedule_next_batch()
+
+        # Snapshot batch composition before the forward pass mutates lengths.
+        tracer = get_tracer()
+        if tracer.enabled and forward_input is not None:
+            tracer.set_batch(forward_input.batch)
+
         ongoing_data = None
         if forward_input is not None:
             ongoing_data = (forward_input, self._forward(forward_input))
 
         self._process_last_data(ongoing_data)
+
+        # One clean schedule -> forward -> commit unit per recorded step.
+        if tracer.enabled:
+            tracer.commit_step(self.cache_manager)
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:

@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Tuple, TypeAlias
 
 import torch
 from minisgl.core import get_global_ctx
+from minisgl.trace import RadixNodeDump, get_tracer
 from minisgl.utils import align_down
 
 from .base import BaseCacheHandle, BasePrefixCache, InsertResult, MatchResult, SizeInfo
@@ -232,6 +233,9 @@ class RadixPrefixCache(BasePrefixCache):
         """
 
         node, prefix_len = self._tree_walk(input_ids)
+        get_tracer().emit_match(
+            input_len=len(input_ids), matched_len=prefix_len, node=node.uuid
+        )
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
     def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
@@ -242,12 +246,17 @@ class RadixPrefixCache(BasePrefixCache):
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
         node, prefix_len = self._tree_walk(input_ids)
+        edge_len = 0
         if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
             new_node = RadixTreeNode(self.key_fn)
             new_node.set_key_value(input_ids[prefix_len:], indices[prefix_len:].clone())
             new_node.set_parent(node)
             self.evictable_size += new_node.length
             node = new_node
+            edge_len = new_node.length
+        get_tracer().emit_insert(
+            already_cached=prefix_len, insert_len=insert_len, node=node.uuid, edge_len=edge_len
+        )
         return InsertResult(prefix_len, RadixCacheHandle(insert_len, node))
 
     def evict(self, size: int) -> torch.Tensor:
@@ -270,6 +279,7 @@ class RadixPrefixCache(BasePrefixCache):
         leave_nodes = self._collect_leave_nodes_for_evict()
         heapq.heapify(leave_nodes)
         evicted_indices: List[torch.Tensor] = []
+        evicted_nodes: List[int] = []
         evicted_size = 0
 
         while evicted_size < size:
@@ -280,6 +290,7 @@ class RadixPrefixCache(BasePrefixCache):
             assert node.ref_count == 0 and node.is_leaf() and not node.is_root()
             evicted_size += node.length
             evicted_indices.append(node.value)
+            evicted_nodes.append(node.uuid)
             self.evictable_size -= node.length
             parent = node.parent
             del parent.children[self.key_fn(node._key)]
@@ -289,6 +300,7 @@ class RadixPrefixCache(BasePrefixCache):
             if parent.is_leaf() and parent.ref_count == 0:
                 heapq.heappush(leave_nodes, parent)
 
+        get_tracer().emit_evict(requested=size, evicted_len=evicted_size, nodes=evicted_nodes)
         return torch.cat(evicted_indices)
 
     def reset(self) -> None:
@@ -315,6 +327,46 @@ class RadixPrefixCache(BasePrefixCache):
         """
 
         pass
+
+    def dump_tree(self, preview: int = 8) -> List[RadixNodeDump]:
+        """
+        Serialize the current tree structure for the visualizer trace.
+
+        Args:
+            preview: Number of leading token ids to keep per edge for display.
+
+        Returns:
+            One :class:`RadixNodeDump` per node, root first is not guaranteed.
+        """
+
+        nodes: List[RadixNodeDump] = []
+        stack: List[RadixTreeNode] = [self.root_node]
+        while stack:
+            node = stack.pop()
+            if node.is_root():
+                nodes.append(
+                    RadixNodeDump(
+                        uuid=node.uuid,
+                        parent=None,
+                        length=0,
+                        ref_count=node.ref_count,
+                        protected=node.ref_count > 0,
+                        tokens=[],
+                    )
+                )
+            else:
+                nodes.append(
+                    RadixNodeDump(
+                        uuid=node.uuid,
+                        parent=node.parent.uuid,
+                        length=node.length,
+                        ref_count=node.ref_count,
+                        protected=node.ref_count > 0,
+                        tokens=node._key[:preview].tolist(),
+                    )
+                )
+            stack.extend(node.children.values())
+        return nodes
 
     def _collect_leave_nodes_for_evict(self) -> List[RadixTreeNode]:
         """

@@ -73,6 +73,7 @@ MINISGL_ENV_PREFIX = "MINISGL_"
 EnvInt = partial(EnvVar[int], fn=int)
 EnvFloat = partial(EnvVar[float], fn=float)
 EnvBool = partial(EnvVar[bool], fn=_TO_BOOL)
+EnvStr = partial(EnvVar[str], fn=str)
 EnvOption = partial(EnvVar[bool | None], fn=_TO_BOOL, default_value=None)
 EnvMem = partial(EnvVar[int], fn=_PARSE_MEM_BYTES)
 
@@ -94,6 +95,9 @@ class EnvClassSingleton:
     FLASHINFER_USE_TENSOR_CORES = EnvOption()
     DISABLE_OVERLAP_SCHEDULING = EnvBool(False)
     PYNCCL_MAX_BUFFER_SIZE = EnvMem(1024**3)
+
+    # scheduler/kv-cache trace for the visualizer (empty path disables tracing)
+    TRACE_SCHEDULER_PATH = EnvStr("")
 
     def __new__(cls):
         """
