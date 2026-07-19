@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-SGLang · Scheduler &amp; KV-Cache Replay</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="titles">
+        <h1>Scheduler &amp; KV-Cache Replay</h1>
+        <p id="meta-line" class="meta">Load a trace to begin.</p>
+      </div>
+      <div class="loader">
+        <label class="file-btn">
+          Load trace…
+          <input id="file-input" type="file" accept="application/json,.json" hidden />
+        </label>
+        <span class="hint">or drag a <code>trace.json</code> here</span>
+      </div>
+    </header>
+
+    <section class="controls">
+      <button id="btn-prev" title="Previous step">⟨</button>
+      <button id="btn-play" title="Play / pause">▶</button>
+      <button id="btn-next" title="Next step">⟩</button>
+      <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
+      <div class="step-label">
+        <span id="step-index">–</span>
+        <span id="step-desc" class="desc"></span>
+      </div>
+    </section>
+
+    <main class="grid" id="drop-zone">
+      <section class="panel tree-panel">
+        <h2>Radix prefix tree</h2>
+        <div class="legend">
+          <span class="chip protected">protected</span>
+          <span class="chip evictable">evictable</span>
+          <span class="chip matched">matched</span>
+          <span class="chip inserted">inserted</span>
+        </div>
+        <div class="tree-scroll">
+          <svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+      </section>
+
+      <div class="right-col">
+        <section class="panel batch-panel">
+          <h2>Batch composition</h2>
+          <div id="batch-list" class="batch-list"></div>
+        </section>
+
+        <section class="panel mem-panel">
+          <h2>Memory &amp; pages</h2>
+          <div id="mem-stats" class="mem-stats"></div>
+          <svg id="mem-bar" class="mem-bar" xmlns="http://www.w3.org/2000/svg"></svg>
+          <h3>Free pages over time</h3>
+          <svg id="mem-spark" class="mem-spark" xmlns="http://www.w3.org/2000/svg"></svg>
+        </section>
+      </div>
+    </main>
+
+    <p class="empty-hint" id="empty-hint">
+      No trace loaded. Generate one with
+      <code>python benchmark/offline/trace_radix_demo.py</code> or drop a
+      <code>trace.json</code> above.
+    </p>
+
+    <script src="app.js"></script>
+  </body>
+</html>
